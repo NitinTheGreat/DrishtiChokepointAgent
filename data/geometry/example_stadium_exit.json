@@ -1,0 +1,49 @@
+{
+  "scene_id": "demo_stadium_exit",
+  "image_width": 640,
+  "image_height": 480,
+  "walkable_area": {
+    "vertices": [
+      {"x": 50, "y": 50},
+      {"x": 590, "y": 50},
+      {"x": 590, "y": 430},
+      {"x": 50, "y": 430}
+    ]
+  },
+  "chokepoints": [
+    {
+      "id": "exit_a",
+      "name": "Stadium Exit A",
+      "width_meters": 3.5,
+      "pixels_per_meter": 50.0,
+      "reference_line": {
+        "start": {"x": 270, "y": 200},
+        "end": {"x": 370, "y": 200}
+      },
+      "upstream_region": {
+        "vertices": [
+          {"x": 200, "y": 50},
+          {"x": 440, "y": 50},
+          {"x": 440, "y": 190},
+          {"x": 200, "y": 190}
+        ]
+      },
+      "chokepoint_region": {
+        "vertices": [
+          {"x": 270, "y": 190},
+          {"x": 370, "y": 190},
+          {"x": 370, "y": 210},
+          {"x": 270, "y": 210}
+        ]
+      },
+      "downstream_region": {
+        "vertices": [
+          {"x": 200, "y": 210},
+          {"x": 440, "y": 210},
+          {"x": 440, "y": 430},
+          {"x": 200, "y": 430}
+        ]
+      }
+    }
+  ]
+}

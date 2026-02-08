@@ -1,0 +1,86 @@
+# DrishtiChokepointAgent Docker Compose
+# ======================================
+# Local development setup with DrishtiStream integration.
+#
+# Usage:
+#   docker-compose up        # Start both services
+#   docker-compose up agent  # Start only the agent
+
+version: "3.8"
+
+services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # DrishtiChokepointAgent
+  # ─────────────────────────────────────────────────────────────────────────
+  agent:
+    build: .
+    container_name: drishti-agent
+    ports:
+      - "8001:8001"
+    environment:
+      - DRISHTI_STREAM_URL=ws://stream:8000/ws/stream
+      - DRISHTI_LOG_LEVEL=DEBUG
+      - DRISHTI_PERCEPTION_BACKEND=mock
+    volumes:
+      # Mount geometry files for easy editing
+      - ./data/geometry:/app/data/geometry:ro
+    depends_on:
+      - stream
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # DrishtiStream (upstream video source)
+  # ─────────────────────────────────────────────────────────────────────────
+  # NOTE: This assumes DrishtiStream is available as a sibling directory
+  # Uncomment and adjust the build path if running both locally
+  #
+  # stream:
+  #   build: ../Ingestion
+  #   container_name: drishti-stream
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     - DRISHTI_FPS=0
+  #     - DRISHTI_LOG_LEVEL=INFO
+  #   volumes:
+  #     - ../Ingestion/data:/app/data:ro
+
+  # Placeholder mock stream for testing without DrishtiStream
+  stream:
+    image: python:3.11-slim
+    container_name: drishti-stream-placeholder
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "pip install -q websockets fastapi uvicorn &&
+             python -c '
+      import asyncio from fastapi import FastAPI, WebSocket import uvicorn import time
+
+      app = FastAPI()
+
+      @app.websocket(\"/ws/stream\") async def stream(ws: WebSocket):
+          await ws.accept()
+          frame_id = 0
+          while True:
+              msg = {
+                  \"source\": \"DrishtiStream\",
+                  \"version\": \"v1.0\",
+                  \"frame_id\": frame_id,
+                  \"timestamp\": time.time(),
+                  \"fps\": 10,
+                  \"image\": \"\"
+              }
+              await ws.send_json(msg)
+              frame_id += 1
+              await asyncio.sleep(0.1)
+
+      uvicorn.run(app, host=\"0.0.0.0\", port=8000) '"
+
+networks:
+  default:
+    name: drishti-network

@@ -1,0 +1,122 @@
+# DrishtiChokepointAgent Configuration
+# =====================================
+# This file controls the behavior of the chokepoint reasoning agent.
+# All values can be overridden via environment variables (DRISHTI_* prefix).
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent Identity
+# ─────────────────────────────────────────────────────────────────────────────
+agent:
+  # Unique name for this agent instance
+  name: "drishti-chokepoint-agent"
+  
+  # Semantic version of the agent protocol
+  version: "v0.1.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stream Connection (DrishtiStream)
+# ─────────────────────────────────────────────────────────────────────────────
+stream:
+  # WebSocket URL of the upstream DrishtiStream service
+  url: "ws://localhost:8000/ws/stream"
+  
+  # Delay between reconnection attempts (seconds)
+  reconnect_delay_seconds: 5
+  
+  # Maximum reconnection attempts before giving up (0 = unlimited)
+  max_reconnect_attempts: 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Perception Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+perception:
+  # Backend for occupancy/density estimation
+  # Options: "mock" (fixed values for testing), "google_vision" (production)
+  backend: "mock"
+  
+  # Mock backend configuration
+  mock:
+    # Fixed people count to return (for deterministic testing)
+    fixed_count: 15
+    
+    # Fixed density to return (people per square meter)
+    fixed_density: 0.35
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Geometry Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+geometry:
+  # Path to JSON file defining chokepoints, walkable areas, reference lines
+  definition_path: "./data/geometry/example_stadium_exit.json"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Decision Thresholds
+# ─────────────────────────────────────────────────────────────────────────────
+# These thresholds control state transitions. All values are derived from
+# crowd dynamics literature (Fruin, Helbing, etc.)
+
+thresholds:
+  # Density thresholds (people per square meter)
+  # Reference: Level of Service standards (Fruin, 1971)
+  #   - < 0.3: Free flow (LOS A)
+  #   - 0.3-0.5: Restricted flow (LOS C)
+  #   - 0.5-0.7: Severely restricted (LOS E)
+  #   - > 0.7: Dangerous crowding (LOS F)
+  density:
+    buildup: 0.4    # Transition to BUILDUP state
+    critical: 0.7   # Transition to CRITICAL state
+  
+  # Flow pressure thresholds (inflow_rate / capacity ratio)
+  # Values > 1.0 indicate inflow exceeds sustainable capacity
+  flow_pressure:
+    buildup: 0.8
+    critical: 1.0
+  
+  # Flow coherence thresholds
+  # 1.0 = perfectly aligned flow, 0.0 = chaotic
+  flow_coherence:
+    warning: 0.6    # Below this suggests disorganized crowd
+  
+  # Hysteresis: minimum frames to stay in state before transitioning down
+  # Prevents oscillation between states
+  hysteresis_frames: 30
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Physics Constants
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants used in crowd dynamics calculations.
+# These are empirically derived and should not be changed without justification.
+
+physics:
+  # Capacity coefficient (k) for chokepoint flow
+  # capacity = k × chokepoint_width
+  # Reference: typical pedestrian flow rate ~1.3 persons/meter/second
+  capacity_coefficient_k: 1.3
+  
+  # Minimum flow magnitude to consider as "movement"
+  # Filters out noise from optical flow
+  min_flow_magnitude: 0.5
+  
+  # Angular bins for flow direction histogram
+  # Used for computing directional entropy
+  direction_bins: 8
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Server Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+server:
+  # Host to bind to (0.0.0.0 for container deployments)
+  host: "0.0.0.0"
+  
+  # Port to listen on
+  port: 8001
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+  
+  # Log format: "json" (structured) or "text" (human-readable)
+  format: "json"
