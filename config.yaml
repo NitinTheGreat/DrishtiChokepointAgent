@@ -23,6 +23,12 @@ stream:
   # Delay between reconnection attempts (seconds)
   reconnect_delay_seconds: 5
   
+  # Backoff in milliseconds between reconnect attempts
+  reconnect_backoff_ms: 500
+  
+  # Maximum size of internal frame buffer (drops oldest on overflow)
+  max_queue_size: 50
+  
   # Maximum reconnection attempts before giving up (0 = unlimited)
   max_reconnect_attempts: 0
 

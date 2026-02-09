@@ -61,10 +61,20 @@ class StreamConfig(BaseModel):
         gt=0,
         description="Delay between reconnection attempts",
     )
+    reconnect_backoff_ms: int = Field(
+        default=500,
+        ge=100,
+        description="Backoff in milliseconds between reconnect attempts",
+    )
     max_reconnect_attempts: int = Field(
         default=0,
         ge=0,
         description="Maximum reconnection attempts (0 = unlimited)",
+    )
+    max_queue_size: int = Field(
+        default=50,
+        ge=1,
+        description="Maximum size of internal frame buffer",
     )
 
 
@@ -235,6 +245,10 @@ def _apply_env_overrides(config_data: dict) -> None:
     # Stream settings
     if env_url := os.environ.get("DRISHTI_STREAM_URL"):
         config_data.setdefault("stream", {})["url"] = env_url
+    if env_backoff := os.environ.get("DRISHTI_RECONNECT_BACKOFF_MS"):
+        config_data.setdefault("stream", {})["reconnect_backoff_ms"] = int(env_backoff)
+    if env_queue := os.environ.get("DRISHTI_MAX_QUEUE_SIZE"):
+        config_data.setdefault("stream", {})["max_queue_size"] = int(env_queue)
     if env_delay := os.environ.get("DRISHTI_RECONNECT_DELAY"):
         config_data.setdefault("stream", {})["reconnect_delay_seconds"] = float(env_delay)
     

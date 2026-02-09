@@ -6,15 +6,12 @@ FastAPI entry point for the chokepoint reasoning agent.
 
 This module provides:
     - Health check endpoint for orchestration
-    - Metrics endpoint for observability
-    - WebSocket endpoint for real-time output streaming
-    - Lifespan management (startup/shutdown)
+    - WebSocket endpoint for real-time output streaming (future)
+    - Lifespan management for stream ingestion (startup/shutdown)
 
 Endpoints:
     GET  /          - Service information
-    GET  /health    - Health check
-    GET  /metrics   - Agent metrics
-    WS   /ws/output - Real-time agent output stream
+    GET  /health    - Health check with stream status
 
 Example:
     # Run locally
@@ -22,23 +19,45 @@ Example:
     
     # Or with auto-reload for development
     uvicorn src.drishti_agent.main:app --reload
-
-Note:
-    This is a SCAFFOLD. The agent processing loop will be
-    implemented in subsequent commits.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import JSONResponse
 
 from drishti_agent.config import settings
+from drishti_agent.stream import Frame, FrameBuffer, FrameConsumer
 
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Global Components (set during lifespan)
+# =============================================================================
+
+# Frame buffer - interface for downstream stages
+_frame_buffer: Optional[FrameBuffer] = None
+
+# Frame consumer - WebSocket client
+_frame_consumer: Optional[FrameConsumer] = None
+
+# Background task running the consumer
+_consumer_task: Optional[asyncio.Task] = None
+
+
+def get_frame_buffer() -> Optional[FrameBuffer]:
+    """Get the global frame buffer for downstream processing."""
+    return _frame_buffer
+
+
+def get_frame_consumer() -> Optional[FrameConsumer]:
+    """Get the global frame consumer for metrics access."""
+    return _frame_consumer
 
 
 # =============================================================================
@@ -50,31 +69,62 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Application lifespan manager.
     
-    Handles startup and shutdown tasks:
-    - Startup: Load geometry, connect to DrishtiStream
-    - Shutdown: Gracefully disconnect
-    
-    TODO: Implement startup/shutdown logic
+    Startup:
+        - Create FrameBuffer for frame queueing
+        - Create FrameConsumer for WebSocket ingestion
+        - Start consumer as background task
+        
+    Shutdown:
+        - Stop consumer gracefully
+        - Wait for background task to complete
     """
+    global _frame_buffer, _frame_consumer, _consumer_task
+    
     # Startup
     logger.info(f"Starting {settings.agent.name} {settings.agent.version}")
-    logger.info(f"Connecting to DrishtiStream at: {settings.stream.url}")
+    logger.info(f"Stream URL: {settings.stream.url}")
+    logger.info(f"Queue size: {settings.stream.max_queue_size}")
     
-    # TODO: Load geometry
-    # from drishti_agent.geometry import GeometryManager
-    # geometry_manager = GeometryManager()
-    # geometry_manager.load_from_file(settings.geometry.definition_path)
+    # Create frame buffer
+    _frame_buffer = FrameBuffer(maxsize=settings.stream.max_queue_size)
     
-    # TODO: Initialize perception backend
-    # TODO: Connect to DrishtiStream
-    # TODO: Start agent processing loop
+    # Create frame consumer
+    _frame_consumer = FrameConsumer(
+        url=settings.stream.url,
+        buffer=_frame_buffer,
+        reconnect_backoff_ms=settings.stream.reconnect_backoff_ms,
+        max_reconnect_attempts=settings.stream.max_reconnect_attempts,
+    )
+    
+    # Start consumer as background task
+    _consumer_task = asyncio.create_task(
+        _frame_consumer.run(),
+        name="frame_consumer"
+    )
+    
+    logger.info("FrameConsumer started as background task")
     
     yield
     
     # Shutdown
     logger.info("Shutting down...")
-    # TODO: Graceful disconnect from DrishtiStream
-    # TODO: Cleanup resources
+    
+    if _frame_consumer:
+        await _frame_consumer.stop()
+    
+    if _consumer_task:
+        # Wait for task to complete (should exit quickly after stop())
+        try:
+            await asyncio.wait_for(_consumer_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Consumer task did not exit in time, cancelling")
+            _consumer_task.cancel()
+            try:
+                await _consumer_task
+            except asyncio.CancelledError:
+                pass
+    
+    logger.info("Shutdown complete")
 
 
 # =============================================================================
@@ -113,41 +163,37 @@ async def health() -> JSONResponse:
     """
     Health check endpoint for orchestration.
     
-    Used by Cloud Run, Kubernetes, and other orchestrators
-    to determine if the service is healthy.
-    
-    TODO: Add meaningful health checks
+    Returns stream connection status and frame ingestion metrics.
+    Used by Cloud Run, Kubernetes, and other orchestrators.
     """
-    # TODO: Check connection to DrishtiStream
-    # TODO: Check if agent is processing frames
+    # Get consumer metrics
+    consumer = get_frame_consumer()
+    buffer = get_frame_buffer()
+    
+    if consumer is None or buffer is None:
+        return JSONResponse({
+            "status": "starting",
+            "stream_connected": False,
+            "frames_received": 0,
+            "last_frame_id": -1,
+        })
+    
+    metrics = consumer.metrics
+    buffer_metrics = buffer.metrics()
+    
+    # Determine overall health status
+    # Healthy if: consumer exists and has received at least one frame
+    # or is currently connected
+    is_healthy = consumer.connected or metrics.frames_received > 0
     
     return JSONResponse({
-        "status": "healthy",
-        "agent": settings.agent.name,
-        "version": settings.agent.version,
-    })
-
-
-@app.get("/metrics")
-async def metrics() -> JSONResponse:
-    """
-    Detailed agent metrics endpoint.
-    
-    Returns operational metrics for observability.
-    
-    TODO: Implement actual metrics collection
-    """
-    # TODO: Return actual metrics
-    # - frames_processed
-    # - current_risk_state
-    # - processing_latency_ms
-    # - stream_connection_status
-    
-    return JSONResponse({
-        "frames_processed": 0,
-        "current_risk_state": "NORMAL",
-        "processing_latency_ms": 0.0,
-        "stream_connected": False,
+        "status": "healthy" if is_healthy else "degraded",
+        "stream_connected": consumer.connected,
+        "frames_received": metrics.frames_received,
+        "last_frame_id": metrics.last_frame_id,
+        "reconnect_count": metrics.reconnect_count,
+        "buffer_size": buffer_metrics["size"],
+        "buffer_dropped": buffer_metrics["dropped_count"],
     })
 
 
@@ -163,16 +209,12 @@ async def output_stream(websocket: WebSocket) -> None:
     Clients can connect here to receive AgentOutput messages
     as the agent processes frames.
     
-    TODO: Implement output streaming
+    Note: This is a scaffold for future phases.
     """
     await websocket.accept()
     logger.info("Client connected to /ws/output")
     
     try:
-        # TODO: Stream agent outputs as they are produced
-        # async for output in agent_output_queue:
-        #     await websocket.send_json(output.model_dump())
-        
         # Placeholder: send a test message
         await websocket.send_json({
             "message": "Output streaming not yet implemented",
@@ -181,7 +223,6 @@ async def output_stream(websocket: WebSocket) -> None:
         
         # Keep connection open
         while True:
-            # Wait for client messages (e.g., close request)
             data = await websocket.receive_text()
             if data == "close":
                 break

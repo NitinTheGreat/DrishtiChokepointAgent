@@ -79,3 +79,5 @@ Desktop.ini
 
 # Jupyter (should not be used, but just in case)
 .ipynb_checkpoints/
+drishti-vision-sa.json
+*.json
