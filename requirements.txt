@@ -25,6 +25,10 @@ langgraph>=0.0.40
 # Logging
 structlog>=24.1.0
 
+# Cloud Vision API (optional, for production perception)
+# Install only if using vision backend
+# google-cloud-vision>=3.7.0
+
 # Development dependencies (install with: pip install -r requirements.txt -e ".[dev]")
 # pytest>=8.0.0
 # pytest-asyncio>=0.23.0

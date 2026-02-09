@@ -37,7 +37,7 @@ stream:
 # ─────────────────────────────────────────────────────────────────────────────
 perception:
   # Backend for occupancy/density estimation
-  # Options: "mock" (fixed values for testing), "google_vision" (production)
+  # Options: "mock" (testing), "vision" (Google Cloud Vision API)
   backend: "mock"
   
   # Region of interest area in square meters (for density calculation)
@@ -54,6 +54,21 @@ perception:
     
     # Fixed density to return (people per square meter)
     fixed_density: 0.35
+  
+  # Vision backend configuration (Google Cloud Vision API)
+  vision:
+    # Process every N frames (1 = all, 5 = 1 in 5 frames)
+    # Higher = lower cost, less responsive
+    sample_rate: 5
+    
+    # Maximum API calls per second
+    max_rps: 2.0
+    
+    # Minimum confidence for person detection (0.0-1.0)
+    confidence_threshold: 0.6
+    
+    # Path to service account JSON (null = use ADC / default credentials)
+    credentials_path: null
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Motion Configuration (Phase 3)

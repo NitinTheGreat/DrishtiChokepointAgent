@@ -7,24 +7,32 @@ Occupancy and density estimation for crowd safety monitoring.
 This module provides a black-box abstraction for perception.
 The agent consumes ONLY the outputs of this module, never raw frames.
 
-Phase 2 Components:
-    - PerceptionEngine: Protocol for density estimation (takes Frame)
+Components:
+    - PerceptionEngine: Protocol for density estimation
     - MockPerceptionEngine: Deterministic mock for testing
-    
-Legacy Components (Phase 1, kept for reference):
-    - OccupancyEstimator: Original protocol (takes numpy array)
-    - MockOccupancyEstimator: Original mock
+    - VisionPerceptionEngine: Google Cloud Vision API (production)
 
 Design Philosophy:
     Perception is treated as a pluggable black box. The agent
     reasons over density values, NOT over perception internals.
 """
 
-# Phase 2: New perception interface (no image decoding)
 from drishti_agent.perception.engine import (
     PerceptionEngine,
     MockPerceptionEngine,
 )
+
+# Vision engine imported separately to avoid mandatory dependency
+try:
+    from drishti_agent.perception.vision_engine import (
+        VisionPerceptionEngine,
+        VisionAPIError,
+    )
+    _VISION_AVAILABLE = True
+except ImportError:
+    _VISION_AVAILABLE = False
+    VisionPerceptionEngine = None  # type: ignore
+    VisionAPIError = None  # type: ignore
 
 # Legacy: Original occupancy interface (kept for compatibility)
 from drishti_agent.perception.occupancy import (
@@ -34,11 +42,12 @@ from drishti_agent.perception.occupancy import (
 )
 
 __all__ = [
-    # Phase 2
     "PerceptionEngine",
     "MockPerceptionEngine",
-    # Legacy
+    "VisionPerceptionEngine",
+    "VisionAPIError",
     "OccupancyEstimator",
     "OccupancyResult",
     "MockOccupancyEstimator",
+    "_VISION_AVAILABLE",
 ]

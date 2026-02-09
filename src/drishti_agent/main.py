@@ -9,26 +9,35 @@ Phase 2: Perception abstraction + density signal pipeline
 Phase 3: Motion physics + flow pressure/coherence signals
 Phase 4: LangGraph agent with deterministic state transitions
 Phase 5: Analytics packaging + visualization artifacts
+Phase 6: Production hardening + real perception integration
 
 Endpoints:
     GET  /          - Service information
-    GET  /health    - Health check with full status
+    GET  /health    - Liveness probe (is process alive?)
+    GET  /ready     - Readiness probe (stream connected + agent ready?)
     GET  /output    - Full agent output payload
     WS   /ws/output - Real-time output stream
 """
 
 import asyncio
 import logging
+import os
+import signal
+import sys
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, Union
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import JSONResponse
 
 from drishti_agent.config import settings
 from drishti_agent.stream import Frame, FrameBuffer, FrameConsumer
-from drishti_agent.perception import MockPerceptionEngine
+from drishti_agent.perception import (
+    MockPerceptionEngine,
+    VisionPerceptionEngine,
+    _VISION_AVAILABLE,
+)
 from drishti_agent.signals import DensitySignalProcessor, FlowSignalProcessor
 from drishti_agent.models.density import DensityState
 from drishti_agent.models.flow import FlowState
@@ -52,8 +61,11 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Global Components (set during lifespan)
+# Global State
 # =============================================================================
+
+# Shutdown flag
+_shutdown_flag: bool = False
 
 # Phase 1: Frame ingestion
 _frame_buffer: Optional[FrameBuffer] = None
@@ -61,7 +73,7 @@ _frame_consumer: Optional[FrameConsumer] = None
 _consumer_task: Optional[asyncio.Task] = None
 
 # Phase 2: Perception and density
-_perception_engine: Optional[MockPerceptionEngine] = None
+_perception_engine: Optional[Union[MockPerceptionEngine, VisionPerceptionEngine]] = None
 _density_processor: Optional[DensitySignalProcessor] = None
 
 # Phase 3: Flow processing
@@ -83,41 +95,95 @@ _current_flow_state: Optional[FlowState] = None
 _current_decision: Optional[Decision] = None
 _current_output: Optional[AgentOutput] = None
 _last_frame_id: int = -1
+_startup_time: float = 0.0
+_is_ready: bool = False
 
+# Error counters
+_frame_error_count: int = 0
+_perception_error_count: int = 0
+
+
+# =============================================================================
+# Getters
+# =============================================================================
 
 def get_frame_buffer() -> Optional[FrameBuffer]:
-    """Get the global frame buffer."""
     return _frame_buffer
 
-
 def get_frame_consumer() -> Optional[FrameConsumer]:
-    """Get the global frame consumer."""
     return _frame_consumer
 
-
 def get_density_state() -> Optional[DensityState]:
-    """Get the current density state."""
     return _current_density_state
 
-
 def get_flow_state() -> Optional[FlowState]:
-    """Get the current flow state."""
     return _current_flow_state
 
-
 def get_current_decision() -> Optional[Decision]:
-    """Get the current agent decision."""
     return _current_decision
 
-
 def get_agent() -> Optional[ChokeAgentGraph]:
-    """Get the agent."""
     return _agent
 
-
 def get_current_output() -> Optional[AgentOutput]:
-    """Get the full agent output."""
     return _current_output
+
+def is_ready() -> bool:
+    return _is_ready
+
+
+# =============================================================================
+# Signal Handlers
+# =============================================================================
+
+def _handle_sigterm(signum, frame):
+    """Handle SIGTERM for graceful shutdown."""
+    global _shutdown_flag
+    logger.info("Received SIGTERM, initiating graceful shutdown...")
+    _shutdown_flag = True
+
+
+# =============================================================================
+# Perception Engine Factory
+# =============================================================================
+
+def create_perception_engine() -> Union[MockPerceptionEngine, VisionPerceptionEngine]:
+    """
+    Create perception engine based on config.
+    
+    Fails fast if vision backend is requested but unavailable.
+    """
+    backend = settings.perception.backend
+    
+    if backend == "mock":
+        logger.info("Using MockPerceptionEngine")
+        return MockPerceptionEngine(
+            base_count=settings.perception.mock.fixed_count,
+            roi_area=settings.perception.roi_area,
+        )
+    
+    elif backend == "vision":
+        if not _VISION_AVAILABLE:
+            raise RuntimeError(
+                "Vision backend requested but google-cloud-vision not installed. "
+                "Install with: pip install google-cloud-vision"
+            )
+        
+        logger.info(
+            f"Using VisionPerceptionEngine: "
+            f"sample_rate={settings.perception.vision.sample_rate}, "
+            f"max_rps={settings.perception.vision.max_rps}"
+        )
+        return VisionPerceptionEngine(
+            roi_area=settings.perception.roi_area,
+            sample_rate=settings.perception.vision.sample_rate,
+            max_rps=settings.perception.vision.max_rps,
+            credentials_path=settings.perception.vision.credentials_path,
+            person_confidence_threshold=settings.perception.vision.confidence_threshold,
+        )
+    
+    else:
+        raise ValueError(f"Unknown perception backend: {backend}")
 
 
 # =============================================================================
@@ -125,13 +191,10 @@ def get_current_output() -> Optional[AgentOutput]:
 # =============================================================================
 
 async def process_frames() -> None:
-    """
-    Frame processing pipeline (Phase 2 + 3 + 4 + 5).
-    
-    Consumes frames from buffer, runs perception + flow + agent + observability.
-    """
+    """Frame processing pipeline (Phase 2 + 3 + 4 + 5)."""
     global _current_density_state, _current_flow_state, _current_decision
-    global _current_output, _last_frame_id
+    global _current_output, _last_frame_id, _is_ready
+    global _frame_error_count, _perception_error_count
     
     if (
         _frame_buffer is None or 
@@ -145,9 +208,10 @@ async def process_frames() -> None:
         logger.error("Processing pipeline not initialized")
         return
     
-    logger.info("Frame processing pipeline started (Phase 2 + 3 + 4 + 5)")
+    logger.info("Frame processing pipeline started")
+    _is_ready = True
     
-    while True:
+    while not _shutdown_flag:
         try:
             # Get next frame from buffer
             frame = await _frame_buffer.get(timeout=1.0)
@@ -159,14 +223,24 @@ async def process_frames() -> None:
             current_time = time.time()
             
             # Phase 2: Density estimation
-            estimate = await _perception_engine.estimate_density(frame)
-            density_state = _density_processor.update(estimate)
-            _current_density_state = density_state
+            try:
+                estimate = await _perception_engine.estimate_density(frame)
+                density_state = _density_processor.update(estimate)
+                _current_density_state = density_state
+            except Exception as e:
+                _perception_error_count += 1
+                logger.error(f"Perception error (frame={frame.frame_id}): {e}")
+                continue  # Skip this frame
             
             # Phase 3: Flow computation
-            flow_state = _flow_processor.update(frame)
-            if flow_state is not None:
-                _current_flow_state = flow_state
+            try:
+                flow_state = _flow_processor.update(frame)
+                if flow_state is not None:
+                    _current_flow_state = flow_state
+            except Exception as e:
+                _frame_error_count += 1
+                logger.error(f"Flow error (frame={frame.frame_id}): {e}")
+                continue  # Skip this frame
             
             # Phase 4: Agent decision
             decision: Optional[Decision] = None
@@ -196,7 +270,6 @@ async def process_frames() -> None:
             
             # Build full output payload
             if decision and state_vector:
-                # Build Analytics model
                 analytics = Analytics(
                     inflow_rate=analytics_snapshot.inflow_rate,
                     capacity=analytics_snapshot.capacity,
@@ -209,7 +282,6 @@ async def process_frames() -> None:
                     ),
                 )
                 
-                # Build Visualization model (optional)
                 viz: Optional[Visualization] = None
                 if _viz_generator.is_enabled:
                     viz = Visualization(
@@ -218,7 +290,6 @@ async def process_frames() -> None:
                         flow_vectors=str(viz_artifacts.flow_vectors) if viz_artifacts.flow_vectors else None,
                     )
                 
-                # Build complete output
                 _current_output = AgentOutput(
                     timestamp=current_time,
                     frame_id=frame.frame_id,
@@ -229,12 +300,14 @@ async def process_frames() -> None:
                 )
             
         except asyncio.CancelledError:
-            logger.info("Frame processing pipeline stopping")
+            logger.info("Frame processing pipeline cancelled")
             break
         except Exception as e:
-            logger.error(f"Error in processing pipeline: {e}")
+            _frame_error_count += 1
+            logger.error(f"Pipeline error: {e}")
             await asyncio.sleep(0.1)
     
+    _is_ready = False
     logger.info("Frame processing pipeline stopped")
 
 
@@ -244,14 +317,22 @@ async def process_frames() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan manager."""
+    """Application lifespan manager with graceful shutdown."""
     global _frame_buffer, _frame_consumer, _consumer_task
     global _perception_engine, _density_processor
     global _flow_processor, _agent, _processing_task
-    global _analytics_computer, _viz_generator
+    global _analytics_computer, _viz_generator, _startup_time
+    
+    # Register signal handlers
+    signal.signal(signal.SIGTERM, _handle_sigterm)
     
     # Startup
+    _startup_time = time.time()
     logger.info(f"Starting {settings.agent.name} {settings.agent.version}")
+    
+    # Get port from env (Cloud Run compatibility)
+    port = int(os.environ.get("PORT", settings.server.port))
+    logger.info(f"Configured port: {port}")
     
     # Phase 1: Stream ingestion
     logger.info(f"Stream URL: {settings.stream.url}")
@@ -267,15 +348,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         name="frame_consumer"
     )
     
-    # Phase 2: Perception and density
-    logger.info(
-        f"Perception: roi_area={settings.perception.roi_area}m², "
-        f"alpha={settings.perception.density_smoothing_alpha}"
-    )
-    _perception_engine = MockPerceptionEngine(
-        base_count=settings.perception.mock.fixed_count,
-        roi_area=settings.perception.roi_area,
-    )
+    # Phase 2: Perception (backend selection)
+    _perception_engine = create_perception_engine()
     _density_processor = DensitySignalProcessor(
         roi_area=settings.perception.roi_area,
         smoothing_alpha=settings.perception.density_smoothing_alpha,
@@ -283,10 +357,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     
     # Phase 3: Flow processing
     capacity = settings.motion.capacity_factor * settings.motion.chokepoint_width
-    logger.info(
-        f"Motion: width={settings.motion.chokepoint_width}m, "
-        f"capacity={capacity:.2f}/s"
-    )
     _flow_processor = FlowSignalProcessor(
         chokepoint_width=settings.motion.chokepoint_width,
         capacity_factor=settings.motion.capacity_factor,
@@ -310,10 +380,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         recovery_sustain_sec=settings.timing.recovery_sustain_sec,
     )
     _agent = ChokeAgentGraph(thresholds=thresholds)
-    logger.info(
-        f"Agent: dwell={settings.timing.min_state_dwell_sec}s, "
-        f"escalation={settings.timing.escalation_sustain_sec}s"
-    )
     
     # Phase 5: Observability
     _analytics_computer = AnalyticsComputer(capacity=capacity)
@@ -322,10 +388,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         heatmap_resolution=settings.observability.heatmap_resolution,
         flow_vector_spacing=settings.observability.flow_vector_spacing,
     )
-    logger.info(
-        f"Observability: viz_enabled={settings.observability.enable_viz}, "
-        f"heatmap={settings.observability.heatmap_resolution}x{settings.observability.heatmap_resolution}"
-    )
     
     # Start processing pipeline
     _processing_task = asyncio.create_task(
@@ -333,12 +395,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         name="frame_processing"
     )
     
-    logger.info("All components started (Phase 1+2+3+4+5)")
+    logger.info("All components started (Phase 1-6)")
     
     yield
     
     # Shutdown
-    logger.info("Shutting down...")
+    logger.info("Shutting down gracefully...")
+    
+    global _shutdown_flag
+    _shutdown_flag = True
     
     if _processing_task:
         _processing_task.cancel()
@@ -387,61 +452,94 @@ async def root() -> JSONResponse:
         "version": settings.agent.version,
         "name": settings.agent.name,
         "status": "running",
-        "phase": 5,
+        "phase": 6,
+        "perception_backend": settings.perception.backend,
     })
 
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    """Health check with Phase 1 + 2 + 3 + 4 + 5 status."""
-    # Phase 1: Stream metrics
+    """
+    Liveness probe - is the process alive?
+    
+    Always returns 200 if the service is running.
+    Used by Cloud Run for liveness checks.
+    """
+    return JSONResponse({
+        "status": "healthy",
+        "uptime_seconds": round(time.time() - _startup_time, 1),
+    })
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    """
+    Readiness probe - is the service ready to handle requests?
+    
+    Returns 200 if stream is connected and agent is initialized.
+    Returns 503 if not ready.
+    Used by Cloud Run for readiness checks.
+    """
+    consumer = get_frame_consumer()
+    
+    stream_connected = consumer.connected if consumer else False
+    agent_ready = _is_ready and _agent is not None
+    
+    is_service_ready = stream_connected or agent_ready
+    
+    if is_service_ready:
+        return JSONResponse({
+            "status": "ready",
+            "stream_connected": stream_connected,
+            "agent_initialized": agent_ready,
+            "frames_processed": _last_frame_id + 1,
+        })
+    else:
+        return JSONResponse(
+            {
+                "status": "not_ready",
+                "stream_connected": stream_connected,
+                "agent_initialized": agent_ready,
+            },
+            status_code=503,
+        )
+
+
+@app.get("/metrics")
+async def metrics() -> JSONResponse:
+    """Detailed metrics for observability."""
     consumer = get_frame_consumer()
     buffer = get_frame_buffer()
     
-    stream_metrics = {
-        "stream_connected": False,
-        "frames_received": 0,
-        "last_frame_id": -1,
-    }
-    
+    stream_metrics = {}
     if consumer and buffer:
-        metrics = consumer.metrics
-        buffer_metrics = buffer.metrics()
         stream_metrics = {
             "stream_connected": consumer.connected,
-            "frames_received": metrics.frames_received,
-            "last_frame_id": metrics.last_frame_id,
-            "reconnect_count": metrics.reconnect_count,
-            "buffer_size": buffer_metrics["size"],
-            "buffer_dropped": buffer_metrics["dropped_count"],
+            "frames_received": consumer.metrics.frames_received,
+            "reconnect_count": consumer.metrics.reconnect_count,
+            "buffer_size": buffer.metrics()["size"],
+            "buffer_dropped": buffer.metrics()["dropped_count"],
         }
     
-    # Phase 2: Density state
     density_state = get_density_state()
-    density_metrics = {"density": None, "density_slope": None}
+    density_metrics = {}
     if density_state:
         density_metrics = {
             "density": round(density_state.density, 4),
             "density_slope": round(density_state.density_slope, 6),
         }
     
-    # Phase 3: Flow state
     flow_state = get_flow_state()
-    flow_metrics = {"flow_pressure": None, "flow_coherence": None}
+    flow_metrics = {}
     if flow_state:
         flow_metrics = {
             "flow_pressure": round(flow_state.flow_pressure, 4),
             "flow_coherence": round(flow_state.flow_coherence, 4),
         }
     
-    # Phase 4: Agent decision
     decision = get_current_decision()
     agent = get_agent()
-    agent_metrics = {
-        "risk_state": None,
-        "decision_confidence": None,
-        "reason_code": None,
-    }
+    agent_metrics = {}
     if decision:
         agent_metrics = {
             "risk_state": decision.risk_state.value,
@@ -451,22 +549,16 @@ async def health() -> JSONResponse:
     if agent:
         agent_metrics["total_frames"] = agent.agent_state.total_frames_processed
     
-    # Phase 5: Observability
-    viz_enabled = settings.observability.enable_viz
-    
-    # Determine overall health
-    is_healthy = (
-        stream_metrics.get("stream_connected", False) or 
-        stream_metrics.get("frames_received", 0) > 0
-    )
-    
     return JSONResponse({
-        "status": "healthy" if is_healthy else "degraded",
+        "uptime_seconds": round(time.time() - _startup_time, 1),
+        "perception_backend": settings.perception.backend,
+        "viz_enabled": settings.observability.enable_viz,
+        "frame_errors": _frame_error_count,
+        "perception_errors": _perception_error_count,
         **stream_metrics,
         **density_metrics,
         **flow_metrics,
         **agent_metrics,
-        "viz_enabled": viz_enabled,
     })
 
 
@@ -495,8 +587,7 @@ async def output_stream(websocket: WebSocket) -> None:
     logger.info("Client connected to /ws/output")
     
     try:
-        while True:
-            # Send current output every second
+        while not _shutdown_flag:
             current_output = get_current_output()
             if current_output:
                 await websocket.send_json(current_output.model_dump(mode="json"))
@@ -515,9 +606,12 @@ async def output_stream(websocket: WebSocket) -> None:
 if __name__ == "__main__":
     import uvicorn
     
+    # Cloud Run uses PORT env var
+    port = int(os.environ.get("PORT", settings.server.port))
+    
     uvicorn.run(
         "drishti_agent.main:app",
         host=settings.server.host,
-        port=settings.server.port,
+        port=port,
         reload=False,
     )

@@ -29,7 +29,7 @@ Example:
 import os
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -85,12 +85,37 @@ class MockPerceptionConfig(BaseModel):
     fixed_density: float = Field(default=0.35, ge=0, description="Fixed density")
 
 
+class VisionPerceptionConfig(BaseModel):
+    """Vision API perception backend configuration."""
+    
+    sample_rate: int = Field(
+        default=5,
+        ge=1,
+        description="Process every N frames (1 = all frames)",
+    )
+    max_rps: float = Field(
+        default=2.0,
+        gt=0,
+        description="Maximum API calls per second",
+    )
+    confidence_threshold: float = Field(
+        default=0.6,
+        ge=0,
+        le=1,
+        description="Minimum confidence for person detection",
+    )
+    credentials_path: Optional[str] = Field(
+        default=None,
+        description="Path to service account JSON (None = use ADC)",
+    )
+
+
 class PerceptionConfig(BaseModel):
     """Perception backend configuration."""
     
-    backend: str = Field(
+    backend: Literal["mock", "vision"] = Field(
         default="mock",
-        description="Perception backend: 'mock' or 'google_vision'",
+        description="Perception backend: 'mock' or 'vision'",
     )
     roi_area: float = Field(
         default=42.0,
@@ -104,6 +129,7 @@ class PerceptionConfig(BaseModel):
         description="EMA smoothing factor for density slope (0, 1]",
     )
     mock: MockPerceptionConfig = Field(default_factory=MockPerceptionConfig)
+    vision: VisionPerceptionConfig = Field(default_factory=VisionPerceptionConfig)
 
 
 class MotionConfig(BaseModel):

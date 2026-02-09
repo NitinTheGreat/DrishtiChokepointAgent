@@ -13,76 +13,76 @@
 DrishtiChokepointAgent is the **core reasoning system** in the Drishti crowd safety platform. It subscribes to DrishtiStream, processes frames sequentially, computes crowd dynamics under explicit spatial constraints, and emits physics-grounded risk decisions.
 
 This repository is designed to be:
-- **Production-quality**: Container-ready, typed, tested
+- **Production-quality**: Container-ready, Cloud Run compatible, typed
 - **Research-defensible**: Physics-grounded, deterministic, inspectable
 - **Readable**: Documented for professors and reviewers
 
-### System Architecture
+---
+
+## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         DRISHTI SYSTEM                                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│   ┌─────────────────┐                                                   │
-│   │  DrishtiStream  │  (Upstream, frozen)                               │
-│   │  Virtual Camera │                                                   │
-│   └────────┬────────┘                                                   │
-│            │                                                            │
-│            │ WebSocket: /ws/stream                                      │
-│            │ (raw frames, JSON + base64 JPEG)                           │
-│            ▼                                                            │
-│   ┌─────────────────────────────────────┐                               │
-│   │  DrishtiChokepointAgent ◄── THIS REPO                               │
-│   │                                     │                               │
-│   │  ┌─────────────┐  ┌──────────────┐  │                               │
-│   │  │ Perception  │  │   Geometry   │  │                               │
-│   │  │ (Occupancy) │  │  (Polygons)  │  │                               │
-│   │  └──────┬──────┘  └──────┬───────┘  │                               │
-│   │         │                │          │                               │
-│   │         ▼                ▼          │                               │
-│   │  ┌──────────────────────────────┐   │                               │
-│   │  │       Flow Computation       │   │                               │
-│   │  │  (Optical Flow, Coherence)   │   │                               │
-│   │  └──────────────┬───────────────┘   │                               │
-│   │                 │                   │                               │
-│   │                 ▼                   │                               │
-│   │  ┌──────────────────────────────┐   │                               │
-│   │  │      Agent State Machine     │   │                               │
-│   │  │  (LangGraph, Deterministic)  │   │                               │
-│   │  └──────────────┬───────────────┘   │                               │
-│   │                 │                   │                               │
-│   └─────────────────┼───────────────────┘                               │
-│                     │                                                   │
-│                     │ WebSocket: /ws/output                             │
-│                     │ (decisions, analytics, viz)                       │
-│                     ▼                                                   │
-│   ┌─────────────────┐                                                   │
-│   │ DrishtiDashboard│                                                   │
-│   │  (Frontend)     │                                                   │
-│   └─────────────────┘                                                   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              DRISHTI SYSTEM                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   DrishtiStream (upstream)                                                   │
+│         │                                                                    │
+│         │ WebSocket: /ws/stream                                              │
+│         │ (frame_id, timestamp, base64 JPEG)                                 │
+│         ▼                                                                    │
+│   ┌─────────────────────────────────────────────────────────────────────┐    │
+│   │                  DrishtiChokepointAgent                              │    │
+│   │                                                                      │    │
+│   │   ┌──────────────┐   ┌────────────────┐   ┌──────────────────┐      │    │
+│   │   │  Perception  │   │ Signal Proc.   │   │   LangGraph      │      │    │
+│   │   │ Mock/Vision  │──▶│ Density+Flow   │──▶│   State Machine  │      │    │
+│   │   └──────────────┘   └────────────────┘   └────────┬─────────┘      │    │
+│   │                                                     │                │    │
+│   │   ┌──────────────────────────────────────────────┐ │                │    │
+│   │   │  Observability (analytics, viz artifacts)   │◀┘                │    │
+│   │   └──────────────────────────────────────────────┘                  │    │
+│   │                                                                      │    │
+│   └──────────────────────────────────────────────────────────────────────┘    │
+│         │                                                                    │
+│         │ HTTP: /output, /health, /ready                                     │
+│         │ WebSocket: /ws/output                                              │
+│         ▼                                                                    │
+│   DrishtiDashboard (downstream)                                              │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Core Concepts
-
-### State Vector
-
-The agent reasons over a minimal physics-grounded state vector:
+## Data Flow
 
 ```
-S_t = {
-    density,        # people/m² in monitored region
-    density_slope,  # Δdensity / Δt
-    flow_pressure,  # inflow_rate / capacity
-    flow_coherence  # 1 / (1 + angular_variance)
-}
+Frame (JPEG) ──▶ Perception ──▶ DensityEstimate ──▶ DensityState
+                                                        │
+Frame (JPEG) ──▶ Optical Flow ──▶ FlowState ───────────┤
+                                                        ▼
+                                               StateVector {
+                                                 density,
+                                                 density_slope,
+                                                 flow_pressure,
+                                                 flow_coherence
+                                               }
+                                                        │
+                                                        ▼
+                                               Agent (LangGraph)
+                                                        │
+                                                        ▼
+                                               Decision {
+                                                 risk_state,
+                                                 confidence,
+                                                 reason_code
+                                               }
 ```
 
-### Key Formulas
+---
+
+## Key Formulas
 
 | Metric | Formula | Reference |
 |--------|---------|-----------|
@@ -91,7 +91,9 @@ S_t = {
 | Flow Pressure | `inflow_rate / capacity` | >1.0 unsustainable |
 | Flow Coherence | `1 / (1 + angular_variance)` | Circular statistics |
 
-### Risk States
+---
+
+## Risk States
 
 | State | Meaning | Transition Trigger |
 |-------|---------|-------------------|
@@ -99,7 +101,7 @@ S_t = {
 | `BUILDUP` | Elevated density/pressure | density > 0.4 OR pressure > 0.8 |
 | `CRITICAL` | Dangerous conditions | density > 0.7 OR pressure > 1.0 |
 
-Downward transitions require **hysteresis** (sustained conditions for N frames).
+Downward transitions require **hysteresis** to prevent oscillation.
 
 ---
 
@@ -112,7 +114,7 @@ Downward transitions require **hysteresis** (sustained conditions for N frames).
   "decision": {
     "risk_state": "CRITICAL",
     "decision_confidence": 0.87,
-    "reason_code": "CAPACITY_VIOLATION_UNDER_COHERENT_FLOW"
+    "reason_code": "CAPACITY_VIOLATION"
   },
   "state": {
     "density": 0.72,
@@ -123,6 +125,7 @@ Downward transitions require **hysteresis** (sustained conditions for N frames).
   "analytics": {
     "inflow_rate": 2.3,
     "capacity": 2.0,
+    "mean_flow_magnitude": 1.5,
     "direction_entropy": 0.31,
     "density_gradient": {
       "upstream": 0.81,
@@ -150,7 +153,6 @@ Downward transitions require **hysteresis** (sustained conditions for N frames).
 ### Installation
 
 ```bash
-# Clone and enter directory
 cd AgentLayer
 
 # Create virtual environment
@@ -164,16 +166,67 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# For Vision backend (optional)
+pip install google-cloud-vision>=3.7.0
 ```
 
 ### Running Locally
 
 ```bash
-# Start the agent
+# Start with mock perception (default)
 uvicorn src.drishti_agent.main:app --host 0.0.0.0 --port 8001
 
-# Verify it's running
+# Verify health
 curl http://localhost:8001/health
+
+# Verify readiness
+curl http://localhost:8001/ready
+
+# Get output
+curl http://localhost:8001/output
+```
+
+---
+
+## Perception Backends
+
+### Mock (Default)
+
+Generates deterministic density values for testing.
+
+```yaml
+# config.yaml
+perception:
+  backend: "mock"
+  mock:
+    fixed_count: 15
+```
+
+### Vision (Google Cloud Vision API)
+
+Uses object detection for real perception.
+
+```yaml
+# config.yaml
+perception:
+  backend: "vision"
+  vision:
+    sample_rate: 5        # Every 5th frame
+    max_rps: 2.0          # Max API calls/sec
+    confidence_threshold: 0.6
+    credentials_path: null  # Uses ADC
+```
+
+**Setup:**
+```bash
+# Install dependency
+pip install google-cloud-vision>=3.7.0
+
+# Set credentials (pick one)
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+# OR use Application Default Credentials (ADC)
+gcloud auth application-default login
 ```
 
 ---
@@ -189,13 +242,13 @@ agent:
 
 stream:
   url: "ws://localhost:8000/ws/stream"
-  reconnect_delay_seconds: 5
 
 perception:
-  backend: "mock"  # "mock" or "google_vision"
+  backend: "mock"  # "mock" or "vision"
 
-geometry:
-  definition_path: "./data/geometry/example_stadium_exit.json"
+observability:
+  enable_viz: false
+  heatmap_resolution: 32
 
 thresholds:
   density:
@@ -204,10 +257,6 @@ thresholds:
   flow_pressure:
     buildup: 0.8
     critical: 1.0
-  hysteresis_frames: 30
-
-physics:
-  capacity_coefficient_k: 1.3
 ```
 
 ### Environment Variables
@@ -216,53 +265,8 @@ physics:
 |----------|-------------|---------|
 | `DRISHTI_STREAM_URL` | DrishtiStream WebSocket URL | `ws://localhost:8000/ws/stream` |
 | `DRISHTI_PERCEPTION_BACKEND` | Perception backend | `mock` |
-| `DRISHTI_GEOMETRY_PATH` | Path to geometry JSON | `./data/geometry/...` |
-| `DRISHTI_DENSITY_CRITICAL` | Critical density threshold | `0.7` |
-| `DRISHTI_AGENT_PORT` | Agent server port | `8001` |
-| `PORT` | Cloud Run port | `8001` |
-
----
-
-## Project Structure
-
-```
-AgentLayer/
-├── src/drishti_agent/
-│   ├── __init__.py           # Package entry
-│   ├── main.py               # FastAPI application
-│   ├── config.py             # Configuration loader
-│   │
-│   ├── models/               # Pydantic data contracts
-│   │   ├── input.py          # FrameMessage (from DrishtiStream)
-│   │   ├── state.py          # RiskState, StateVector, AgentState
-│   │   ├── geometry.py       # Point, Polygon, Chokepoint
-│   │   └── output.py         # Decision, Analytics, AgentOutput
-│   │
-│   ├── perception/           # Occupancy estimation
-│   │   └── occupancy.py      # OccupancyEstimator interface
-│   │
-│   ├── geometry/             # Spatial constraint handling
-│   │   └── regions.py        # GeometryManager
-│   │
-│   ├── flow/                 # Motion metrics
-│   │   ├── optical_flow.py   # Farnebäck, TV-L1
-│   │   └── metrics.py        # Coherence, entropy
-│   │
-│   ├── agent/                # LangGraph state machine
-│   │   ├── graph.py          # Workflow definition
-│   │   ├── nodes.py          # Processing nodes
-│   │   └── transitions.py    # State transition logic
-│   │
-│   └── stream/               # DrishtiStream client
-│       └── client.py         # WebSocket consumer
-│
-├── tests/                    # Test suite
-├── data/geometry/            # Geometry definitions
-├── config.yaml               # Main configuration
-├── Dockerfile                # Container definition
-├── docker-compose.yml        # Local development
-└── README.md                 # This file
-```
+| `PORT` | Server port (Cloud Run) | `8001` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Vision API credentials | ADC |
 
 ---
 
@@ -271,9 +275,11 @@ AgentLayer/
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Service information |
-| `/health` | GET | Health check for orchestration |
-| `/metrics` | GET | Agent operational metrics |
-| `/ws/output` | WebSocket | Real-time agent output stream |
+| `/health` | GET | Liveness probe (always 200) |
+| `/ready` | GET | Readiness probe (503 if not ready) |
+| `/output` | GET | Full agent output payload |
+| `/metrics` | GET | Detailed operational metrics |
+| `/ws/output` | WebSocket | Real-time output stream |
 | `/docs` | GET | OpenAPI documentation |
 
 ---
@@ -286,18 +292,57 @@ AgentLayer/
 # Build image
 docker build -t drishti-agent .
 
-# Run
+# Run with mock perception
 docker run -p 8001:8001 \
   -e DRISHTI_STREAM_URL=ws://host.docker.internal:8000/ws/stream \
   drishti-agent
+
+# Run with Vision API
+docker run -p 8001:8001 \
+  -e DRISHTI_PERCEPTION_BACKEND=vision \
+  -v /path/to/credentials.json:/app/credentials.json \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json \
+  drishti-agent
 ```
 
-### Docker Compose
+---
+
+## Cloud Run Deployment
 
 ```bash
-# Start agent with mock stream
-docker-compose up
+# Build and push
+gcloud builds submit --tag gcr.io/PROJECT_ID/drishti-agent
+
+# Deploy
+gcloud run deploy drishti-agent \
+  --image gcr.io/PROJECT_ID/drishti-agent \
+  --platform managed \
+  --allow-unauthenticated \
+  --set-env-vars DRISHTI_STREAM_URL=wss://stream.drishti.app/ws/stream \
+  --set-env-vars DRISHTI_PERCEPTION_BACKEND=vision
+
+# With service account for Vision API
+gcloud run deploy drishti-agent \
+  --image gcr.io/PROJECT_ID/drishti-agent \
+  --service-account vision-service@PROJECT_ID.iam.gserviceaccount.com
 ```
+
+---
+
+## Safety Guarantees
+
+> [!IMPORTANT]
+> The following safety properties are **architectural guarantees**:
+
+| Guarantee | Enforcement |
+|-----------|-------------|
+| **Deterministic decisions** | LangGraph state machine; no randomness |
+| **No LLM** | Agent uses physics formulas only |
+| **No prediction** | Current-state assessment only |
+| **No identity detection** | Only aggregate density |
+| **Fail-safe defaults** | NORMAL state on errors |
+| **Graceful shutdown** | SIGTERM handler for clean exit |
+| **Error containment** | Vision API failures skip frame, don't crash |
 
 ---
 
@@ -319,18 +364,16 @@ docker-compose up
 
 ## Development Status
 
-> [!IMPORTANT]
-> This is a **scaffold**. Core logic will be implemented in subsequent commits.
+| Phase | Component | Status |
+|-------|-----------|--------|
+| 1 | Stream Ingestion | ✅ Complete |
+| 2 | Perception + Density | ✅ Complete |
+| 3 | Motion Physics | ✅ Complete |
+| 4 | Agent State Machine | ✅ Complete |
+| 5 | Analytics + Visualization | ✅ Complete |
+| 6 | Production Hardening | ✅ Complete |
 
-Current state:
-- ✅ Project structure
-- ✅ Data models (Pydantic)
-- ✅ Configuration system
-- ✅ Module interfaces
-- ⏳ Perception implementation
-- ⏳ Flow computation
-- ⏳ LangGraph integration
-- ⏳ Full processing loop
+**System is DONE.**
 
 ---
 
