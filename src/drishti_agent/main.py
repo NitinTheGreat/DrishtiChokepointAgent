@@ -4,21 +4,12 @@ DrishtiChokepointAgent Main Application
 
 FastAPI entry point for the chokepoint reasoning agent.
 
-This module provides:
-    - Health check endpoint for orchestration
-    - WebSocket endpoint for real-time output streaming (future)
-    - Lifespan management for stream ingestion (startup/shutdown)
+Phase 1: Stream ingestion via FrameConsumer + FrameBuffer
+Phase 2: Perception abstraction + density signal pipeline
 
 Endpoints:
     GET  /          - Service information
-    GET  /health    - Health check with stream status
-
-Example:
-    # Run locally
-    uvicorn src.drishti_agent.main:app --host 0.0.0.0 --port 8001
-    
-    # Or with auto-reload for development
-    uvicorn src.drishti_agent.main:app --reload
+    GET  /health    - Health check with stream and density status
 """
 
 import asyncio
@@ -31,6 +22,9 @@ from fastapi.responses import JSONResponse
 
 from drishti_agent.config import settings
 from drishti_agent.stream import Frame, FrameBuffer, FrameConsumer
+from drishti_agent.perception import MockPerceptionEngine
+from drishti_agent.signals import DensitySignalProcessor
+from drishti_agent.models.density import DensityState
 
 
 logger = logging.getLogger(__name__)
@@ -40,14 +34,16 @@ logger = logging.getLogger(__name__)
 # Global Components (set during lifespan)
 # =============================================================================
 
-# Frame buffer - interface for downstream stages
+# Phase 1: Frame ingestion
 _frame_buffer: Optional[FrameBuffer] = None
-
-# Frame consumer - WebSocket client
 _frame_consumer: Optional[FrameConsumer] = None
-
-# Background task running the consumer
 _consumer_task: Optional[asyncio.Task] = None
+
+# Phase 2: Perception and density
+_perception_engine: Optional[MockPerceptionEngine] = None
+_density_processor: Optional[DensitySignalProcessor] = None
+_processing_task: Optional[asyncio.Task] = None
+_current_density_state: Optional[DensityState] = None
 
 
 def get_frame_buffer() -> Optional[FrameBuffer]:
@@ -60,6 +56,58 @@ def get_frame_consumer() -> Optional[FrameConsumer]:
     return _frame_consumer
 
 
+def get_density_state() -> Optional[DensityState]:
+    """Get the current density state."""
+    return _current_density_state
+
+
+# =============================================================================
+# Processing Pipeline
+# =============================================================================
+
+async def process_frames() -> None:
+    """
+    Frame processing pipeline (Phase 2).
+    
+    Consumes frames from buffer, runs perception, updates density state.
+    This is a simple synchronous pipeline - no agent logic yet.
+    """
+    global _current_density_state
+    
+    if _frame_buffer is None or _perception_engine is None or _density_processor is None:
+        logger.error("Processing pipeline not initialized")
+        return
+    
+    logger.info("Frame processing pipeline started")
+    
+    while True:
+        try:
+            # Get next frame from buffer (wait up to 1 second)
+            frame = await _frame_buffer.get(timeout=1.0)
+            
+            if frame is None:
+                # Timeout, no frame available
+                continue
+            
+            # Run perception
+            estimate = await _perception_engine.estimate_density(frame)
+            
+            # Update density processor
+            state = _density_processor.update(estimate)
+            
+            # Store current state for health endpoint
+            _current_density_state = state
+            
+        except asyncio.CancelledError:
+            logger.info("Frame processing pipeline stopping")
+            break
+        except Exception as e:
+            logger.error(f"Error in processing pipeline: {e}")
+            await asyncio.sleep(0.1)  # Brief pause on error
+    
+    logger.info("Frame processing pipeline stopped")
+
+
 # =============================================================================
 # Lifespan Management
 # =============================================================================
@@ -70,54 +118,73 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Application lifespan manager.
     
     Startup:
-        - Create FrameBuffer for frame queueing
-        - Create FrameConsumer for WebSocket ingestion
-        - Start consumer as background task
+        - Phase 1: Create FrameBuffer, FrameConsumer, start consumer
+        - Phase 2: Create perception engine, density processor, start pipeline
         
     Shutdown:
-        - Stop consumer gracefully
-        - Wait for background task to complete
+        - Stop all tasks gracefully
     """
     global _frame_buffer, _frame_consumer, _consumer_task
+    global _perception_engine, _density_processor, _processing_task
     
     # Startup
     logger.info(f"Starting {settings.agent.name} {settings.agent.version}")
+    
+    # Phase 1: Stream ingestion
     logger.info(f"Stream URL: {settings.stream.url}")
-    logger.info(f"Queue size: {settings.stream.max_queue_size}")
-    
-    # Create frame buffer
     _frame_buffer = FrameBuffer(maxsize=settings.stream.max_queue_size)
-    
-    # Create frame consumer
     _frame_consumer = FrameConsumer(
         url=settings.stream.url,
         buffer=_frame_buffer,
         reconnect_backoff_ms=settings.stream.reconnect_backoff_ms,
         max_reconnect_attempts=settings.stream.max_reconnect_attempts,
     )
-    
-    # Start consumer as background task
     _consumer_task = asyncio.create_task(
         _frame_consumer.run(),
         name="frame_consumer"
     )
     
-    logger.info("FrameConsumer started as background task")
+    # Phase 2: Perception and density
+    logger.info(
+        f"Perception: roi_area={settings.perception.roi_area}m², "
+        f"alpha={settings.perception.density_smoothing_alpha}"
+    )
+    _perception_engine = MockPerceptionEngine(
+        base_count=settings.perception.mock.fixed_count,
+        roi_area=settings.perception.roi_area,
+    )
+    _density_processor = DensitySignalProcessor(
+        roi_area=settings.perception.roi_area,
+        smoothing_alpha=settings.perception.density_smoothing_alpha,
+    )
+    _processing_task = asyncio.create_task(
+        process_frames(),
+        name="frame_processing"
+    )
+    
+    logger.info("All components started")
     
     yield
     
     # Shutdown
     logger.info("Shutting down...")
     
+    # Stop processing pipeline first
+    if _processing_task:
+        _processing_task.cancel()
+        try:
+            await _processing_task
+        except asyncio.CancelledError:
+            pass
+    
+    # Stop stream consumer
     if _frame_consumer:
         await _frame_consumer.stop()
     
     if _consumer_task:
-        # Wait for task to complete (should exit quickly after stop())
         try:
             await asyncio.wait_for(_consumer_task, timeout=5.0)
         except asyncio.TimeoutError:
-            logger.warning("Consumer task did not exit in time, cancelling")
             _consumer_task.cancel()
             try:
                 await _consumer_task
@@ -145,55 +212,68 @@ app = FastAPI(
 
 @app.get("/")
 async def root() -> JSONResponse:
-    """
-    Service information endpoint.
-    
-    Returns basic information about the agent service.
-    """
+    """Service information endpoint."""
     return JSONResponse({
         "service": "DrishtiChokepointAgent",
         "version": settings.agent.version,
         "name": settings.agent.name,
         "status": "running",
+        "phase": 2,
     })
 
 
 @app.get("/health")
 async def health() -> JSONResponse:
     """
-    Health check endpoint for orchestration.
+    Health check endpoint with Phase 1 + Phase 2 status.
     
-    Returns stream connection status and frame ingestion metrics.
-    Used by Cloud Run, Kubernetes, and other orchestrators.
+    Returns stream connection status, frame metrics, and density state.
     """
-    # Get consumer metrics
+    # Phase 1: Stream metrics
     consumer = get_frame_consumer()
     buffer = get_frame_buffer()
     
-    if consumer is None or buffer is None:
-        return JSONResponse({
-            "status": "starting",
-            "stream_connected": False,
-            "frames_received": 0,
-            "last_frame_id": -1,
-        })
+    stream_metrics = {
+        "stream_connected": False,
+        "frames_received": 0,
+        "last_frame_id": -1,
+    }
     
-    metrics = consumer.metrics
-    buffer_metrics = buffer.metrics()
+    if consumer and buffer:
+        metrics = consumer.metrics
+        buffer_metrics = buffer.metrics()
+        stream_metrics = {
+            "stream_connected": consumer.connected,
+            "frames_received": metrics.frames_received,
+            "last_frame_id": metrics.last_frame_id,
+            "reconnect_count": metrics.reconnect_count,
+            "buffer_size": buffer_metrics["size"],
+            "buffer_dropped": buffer_metrics["dropped_count"],
+        }
     
-    # Determine overall health status
-    # Healthy if: consumer exists and has received at least one frame
-    # or is currently connected
-    is_healthy = consumer.connected or metrics.frames_received > 0
+    # Phase 2: Density state
+    density_state = get_density_state()
+    density_metrics = {
+        "density": None,
+        "density_slope": None,
+    }
+    
+    if density_state:
+        density_metrics = {
+            "density": round(density_state.density, 4),
+            "density_slope": round(density_state.density_slope, 6),
+        }
+    
+    # Determine overall health
+    is_healthy = (
+        stream_metrics.get("stream_connected", False) or 
+        stream_metrics.get("frames_received", 0) > 0
+    )
     
     return JSONResponse({
         "status": "healthy" if is_healthy else "degraded",
-        "stream_connected": consumer.connected,
-        "frames_received": metrics.frames_received,
-        "last_frame_id": metrics.last_frame_id,
-        "reconnect_count": metrics.reconnect_count,
-        "buffer_size": buffer_metrics["size"],
-        "buffer_dropped": buffer_metrics["dropped_count"],
+        **stream_metrics,
+        **density_metrics,
     })
 
 
@@ -203,25 +283,16 @@ async def health() -> JSONResponse:
 
 @app.websocket("/ws/output")
 async def output_stream(websocket: WebSocket) -> None:
-    """
-    WebSocket endpoint for real-time agent output.
-    
-    Clients can connect here to receive AgentOutput messages
-    as the agent processes frames.
-    
-    Note: This is a scaffold for future phases.
-    """
+    """WebSocket endpoint for real-time output (scaffold for future phases)."""
     await websocket.accept()
     logger.info("Client connected to /ws/output")
     
     try:
-        # Placeholder: send a test message
         await websocket.send_json({
             "message": "Output streaming not yet implemented",
             "status": "scaffold",
         })
         
-        # Keep connection open
         while True:
             data = await websocket.receive_text()
             if data == "close":

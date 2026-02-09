@@ -92,6 +92,17 @@ class PerceptionConfig(BaseModel):
         default="mock",
         description="Perception backend: 'mock' or 'google_vision'",
     )
+    roi_area: float = Field(
+        default=42.0,
+        gt=0,
+        description="Region of interest area in square meters",
+    )
+    density_smoothing_alpha: float = Field(
+        default=0.2,
+        gt=0,
+        le=1.0,
+        description="EMA smoothing factor for density slope (0, 1]",
+    )
     mock: MockPerceptionConfig = Field(default_factory=MockPerceptionConfig)
 
 

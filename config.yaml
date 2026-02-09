@@ -40,9 +40,16 @@ perception:
   # Options: "mock" (fixed values for testing), "google_vision" (production)
   backend: "mock"
   
+  # Region of interest area in square meters (for density calculation)
+  roi_area: 42.0
+  
+  # EMA smoothing factor for density slope computation
+  # Lower values = smoother, slower response; higher = more responsive
+  density_smoothing_alpha: 0.2
+  
   # Mock backend configuration
   mock:
-    # Fixed people count to return (for deterministic testing)
+    # Base people count for mock engine
     fixed_count: 15
     
     # Fixed density to return (people per square meter)
