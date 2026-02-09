@@ -153,33 +153,57 @@ class GeometryConfig(BaseModel):
 class DensityThresholds(BaseModel):
     """Density thresholds for state transitions."""
     
-    buildup: float = Field(default=0.4, ge=0, description="BUILDUP threshold")
+    buildup: float = Field(default=0.5, ge=0, description="BUILDUP threshold")
+    recovery: float = Field(default=0.4, ge=0, description="Recovery threshold")
     critical: float = Field(default=0.7, ge=0, description="CRITICAL threshold")
+
+
+class DensitySlopeThresholds(BaseModel):
+    """Density slope thresholds."""
+    
+    buildup: float = Field(default=0.05, description="Slope indicating buildup")
 
 
 class FlowPressureThresholds(BaseModel):
     """Flow pressure thresholds."""
     
-    buildup: float = Field(default=0.8, ge=0, description="BUILDUP threshold")
-    critical: float = Field(default=1.0, ge=0, description="CRITICAL threshold")
+    buildup: float = Field(default=0.9, ge=0, description="BUILDUP threshold")
+    critical: float = Field(default=1.1, ge=0, description="CRITICAL threshold")
+    recovery: float = Field(default=0.7, ge=0, description="Recovery threshold")
 
 
 class FlowCoherenceThresholds(BaseModel):
     """Flow coherence thresholds."""
     
-    warning: float = Field(default=0.6, ge=0, le=1.0, description="Warning threshold")
+    critical: float = Field(default=0.7, ge=0, le=1.0, description="Critical coherence")
 
 
 class ThresholdsConfig(BaseModel):
     """All decision thresholds."""
     
     density: DensityThresholds = Field(default_factory=DensityThresholds)
+    density_slope: DensitySlopeThresholds = Field(default_factory=DensitySlopeThresholds)
     flow_pressure: FlowPressureThresholds = Field(default_factory=FlowPressureThresholds)
     flow_coherence: FlowCoherenceThresholds = Field(default_factory=FlowCoherenceThresholds)
-    hysteresis_frames: int = Field(
-        default=30,
-        ge=0,
-        description="Frames to hold state before transitioning down",
+
+
+class AgentTimingConfig(BaseModel):
+    """Agent timing configuration for hysteresis."""
+    
+    min_state_dwell_sec: float = Field(
+        default=5.0,
+        gt=0,
+        description="Minimum time in state before transitioning (seconds)",
+    )
+    escalation_sustain_sec: float = Field(
+        default=3.0,
+        gt=0,
+        description="Time condition must persist for escalation (seconds)",
+    )
+    recovery_sustain_sec: float = Field(
+        default=6.0,
+        gt=0,
+        description="Time condition must persist for recovery (seconds)",
     )
 
 
@@ -231,6 +255,7 @@ class Settings(BaseModel):
     motion: MotionConfig = Field(default_factory=MotionConfig)
     geometry: GeometryConfig = Field(default_factory=GeometryConfig)
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
+    timing: AgentTimingConfig = Field(default_factory=AgentTimingConfig)
     physics: PhysicsConfig = Field(default_factory=PhysicsConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

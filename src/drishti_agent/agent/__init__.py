@@ -2,24 +2,31 @@
 Agent Module
 ============
 
-LangGraph-based deterministic state machine for crowd safety reasoning.
+LangGraph-based agent for chokepoint risk assessment.
 
-This module implements the core agent logic using LangGraph:
-    - graph.py: Workflow definition and state channels
-    - nodes.py: Individual reasoning nodes
-    - transitions.py: State transition logic with hysteresis
-
-Key Design Decisions:
-    - LangGraph is used for STRUCTURE, not LLM reasoning
-    - All transitions are deterministic and inspectable
-    - Hysteresis prevents state oscillation
-    - Agent reasons over StateVector, not raw data
+This module provides:
+    - ChokeAgentGraph: Deterministic state machine
+    - TransitionPolicy: Threshold-based transitions with hysteresis
+    - ReasonCode: Machine-readable decision explanations
 """
 
-from drishti_agent.agent.graph import create_agent_graph
-from drishti_agent.agent.transitions import TransitionPolicy
+from drishti_agent.agent.graph import (
+    ChokeAgentGraph,
+    create_agent_graph,
+    AgentGraphState,
+)
+from drishti_agent.agent.transitions import (
+    TransitionPolicy,
+    TransitionThresholds,
+    TransitionResult,
+)
+
 
 __all__ = [
+    "ChokeAgentGraph",
     "create_agent_graph",
+    "AgentGraphState",
     "TransitionPolicy",
+    "TransitionThresholds",
+    "TransitionResult",
 ]

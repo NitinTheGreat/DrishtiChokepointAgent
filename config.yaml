@@ -93,28 +93,41 @@ geometry:
 thresholds:
   # Density thresholds (people per square meter)
   # Reference: Level of Service standards (Fruin, 1971)
-  #   - < 0.3: Free flow (LOS A)
-  #   - 0.3-0.5: Restricted flow (LOS C)
-  #   - 0.5-0.7: Severely restricted (LOS E)
-  #   - > 0.7: Dangerous crowding (LOS F)
   density:
-    buildup: 0.4    # Transition to BUILDUP state
-    critical: 0.7   # Transition to CRITICAL state
+    buildup: 0.5     # Transition to BUILDUP state
+    recovery: 0.4    # Recovery threshold (lower than buildup)
+    critical: 0.7    # Transition to CRITICAL state
+  
+  # Density slope thresholds (rate of change)
+  density_slope:
+    buildup: 0.05    # Rapid rise indicates buildup
   
   # Flow pressure thresholds (inflow_rate / capacity ratio)
   # Values > 1.0 indicate inflow exceeds sustainable capacity
   flow_pressure:
-    buildup: 0.8
-    critical: 1.0
+    buildup: 0.9
+    critical: 1.1
+    recovery: 0.7    # Recovery threshold
   
   # Flow coherence thresholds
   # 1.0 = perfectly aligned flow, 0.0 = chaotic
   flow_coherence:
-    warning: 0.6    # Below this suggests disorganized crowd
+    critical: 0.7    # High coherence amplifies critical conditions
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent Timing (Phase 4)
+# ─────────────────────────────────────────────────────────────────────────────
+# Time-based hysteresis to prevent oscillation
+
+timing:
+  # Minimum time in state before transitioning (seconds)
+  min_state_dwell_sec: 5.0
   
-  # Hysteresis: minimum frames to stay in state before transitioning down
-  # Prevents oscillation between states
-  hysteresis_frames: 30
+  # Time condition must persist for escalation (seconds)
+  escalation_sustain_sec: 3.0
+  
+  # Time condition must persist for recovery (seconds)
+  recovery_sustain_sec: 6.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Physics Constants

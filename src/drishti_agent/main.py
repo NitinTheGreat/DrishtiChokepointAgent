@@ -7,14 +7,16 @@ FastAPI entry point for the chokepoint reasoning agent.
 Phase 1: Stream ingestion via FrameConsumer + FrameBuffer
 Phase 2: Perception abstraction + density signal pipeline
 Phase 3: Motion physics + flow pressure/coherence signals
+Phase 4: LangGraph agent with deterministic state transitions
 
 Endpoints:
     GET  /          - Service information
-    GET  /health    - Health check with stream, density, and flow status
+    GET  /health    - Health check with stream, density, flow, and agent status
 """
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
@@ -27,6 +29,10 @@ from drishti_agent.perception import MockPerceptionEngine
 from drishti_agent.signals import DensitySignalProcessor, FlowSignalProcessor
 from drishti_agent.models.density import DensityState
 from drishti_agent.models.flow import FlowState
+from drishti_agent.models.state import StateVector
+from drishti_agent.models.output import Decision
+from drishti_agent.agent import ChokeAgentGraph
+from drishti_agent.agent.transitions import TransitionThresholds
 
 
 logger = logging.getLogger(__name__)
@@ -48,12 +54,16 @@ _density_processor: Optional[DensitySignalProcessor] = None
 # Phase 3: Flow processing
 _flow_processor: Optional[FlowSignalProcessor] = None
 
+# Phase 4: Agent
+_agent: Optional[ChokeAgentGraph] = None
+
 # Processing task
 _processing_task: Optional[asyncio.Task] = None
 
 # Current state
 _current_density_state: Optional[DensityState] = None
 _current_flow_state: Optional[FlowState] = None
+_current_decision: Optional[Decision] = None
 
 
 def get_frame_buffer() -> Optional[FrameBuffer]:
@@ -76,28 +86,39 @@ def get_flow_state() -> Optional[FlowState]:
     return _current_flow_state
 
 
+def get_current_decision() -> Optional[Decision]:
+    """Get the current agent decision."""
+    return _current_decision
+
+
+def get_agent() -> Optional[ChokeAgentGraph]:
+    """Get the agent."""
+    return _agent
+
+
 # =============================================================================
 # Processing Pipeline
 # =============================================================================
 
 async def process_frames() -> None:
     """
-    Frame processing pipeline (Phase 2 + Phase 3).
+    Frame processing pipeline (Phase 2 + 3 + 4).
     
-    Consumes frames from buffer, runs perception + flow processing.
+    Consumes frames from buffer, runs perception + flow + agent.
     """
-    global _current_density_state, _current_flow_state
+    global _current_density_state, _current_flow_state, _current_decision
     
     if (
         _frame_buffer is None or 
         _perception_engine is None or 
         _density_processor is None or
-        _flow_processor is None
+        _flow_processor is None or
+        _agent is None
     ):
         logger.error("Processing pipeline not initialized")
         return
     
-    logger.info("Frame processing pipeline started (Phase 2 + 3)")
+    logger.info("Frame processing pipeline started (Phase 2 + 3 + 4)")
     
     while True:
         try:
@@ -116,6 +137,18 @@ async def process_frames() -> None:
             flow_state = _flow_processor.update(frame)
             if flow_state is not None:
                 _current_flow_state = flow_state
+            
+            # Phase 4: Agent decision
+            if _current_flow_state is not None:
+                state_vector = StateVector(
+                    density=density_state.density,
+                    density_slope=density_state.density_slope,
+                    flow_pressure=_current_flow_state.flow_pressure,
+                    flow_coherence=_current_flow_state.flow_coherence,
+                )
+                
+                decision = _agent.process(state_vector)
+                _current_decision = decision
             
         except asyncio.CancelledError:
             logger.info("Frame processing pipeline stopping")
@@ -136,7 +169,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan manager."""
     global _frame_buffer, _frame_consumer, _consumer_task
     global _perception_engine, _density_processor
-    global _flow_processor, _processing_task
+    global _flow_processor, _agent, _processing_task
     
     # Startup
     logger.info(f"Starting {settings.agent.name} {settings.agent.version}")
@@ -172,8 +205,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Phase 3: Flow processing
     logger.info(
         f"Motion: width={settings.motion.chokepoint_width}m, "
-        f"capacity_factor={settings.motion.capacity_factor}, "
-        f"alpha={settings.motion.coherence_smoothing_alpha}"
+        f"capacity_factor={settings.motion.capacity_factor}"
     )
     _flow_processor = FlowSignalProcessor(
         chokepoint_width=settings.motion.chokepoint_width,
@@ -183,13 +215,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         min_active_flow_threshold=settings.motion.min_active_flow_threshold,
     )
     
+    # Phase 4: Agent
+    thresholds = TransitionThresholds(
+        density_buildup=settings.thresholds.density.buildup,
+        density_recovery=settings.thresholds.density.recovery,
+        density_critical=settings.thresholds.density.critical,
+        density_slope_buildup=settings.thresholds.density_slope.buildup,
+        flow_pressure_buildup=settings.thresholds.flow_pressure.buildup,
+        flow_pressure_critical=settings.thresholds.flow_pressure.critical,
+        flow_pressure_recovery=settings.thresholds.flow_pressure.recovery,
+        flow_coherence_critical=settings.thresholds.flow_coherence.critical,
+        min_state_dwell_sec=settings.timing.min_state_dwell_sec,
+        escalation_sustain_sec=settings.timing.escalation_sustain_sec,
+        recovery_sustain_sec=settings.timing.recovery_sustain_sec,
+    )
+    _agent = ChokeAgentGraph(thresholds=thresholds)
+    logger.info(
+        f"Agent: dwell={settings.timing.min_state_dwell_sec}s, "
+        f"escalation={settings.timing.escalation_sustain_sec}s, "
+        f"recovery={settings.timing.recovery_sustain_sec}s"
+    )
+    
     # Start processing pipeline
     _processing_task = asyncio.create_task(
         process_frames(),
         name="frame_processing"
     )
     
-    logger.info("All components started (Phase 1+2+3)")
+    logger.info("All components started (Phase 1+2+3+4)")
     
     yield
     
@@ -243,13 +296,13 @@ async def root() -> JSONResponse:
         "version": settings.agent.version,
         "name": settings.agent.name,
         "status": "running",
-        "phase": 3,
+        "phase": 4,
     })
 
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    """Health check with Phase 1 + 2 + 3 status."""
+    """Health check with Phase 1 + 2 + 3 + 4 status."""
     # Phase 1: Stream metrics
     consumer = get_frame_consumer()
     buffer = get_frame_buffer()
@@ -290,6 +343,23 @@ async def health() -> JSONResponse:
             "flow_coherence": round(flow_state.flow_coherence, 4),
         }
     
+    # Phase 4: Agent decision
+    decision = get_current_decision()
+    agent = get_agent()
+    agent_metrics = {
+        "risk_state": None,
+        "decision_confidence": None,
+        "reason_code": None,
+    }
+    if decision:
+        agent_metrics = {
+            "risk_state": decision.risk_state.value,
+            "decision_confidence": round(decision.decision_confidence, 2),
+            "reason_code": decision.reason_code,
+        }
+    if agent:
+        agent_metrics["total_frames"] = agent.agent_state.total_frames_processed
+    
     # Determine overall health
     is_healthy = (
         stream_metrics.get("stream_connected", False) or 
@@ -301,6 +371,7 @@ async def health() -> JSONResponse:
         **stream_metrics,
         **density_metrics,
         **flow_metrics,
+        **agent_metrics,
     })
 
 
@@ -310,20 +381,21 @@ async def health() -> JSONResponse:
 
 @app.websocket("/ws/output")
 async def output_stream(websocket: WebSocket) -> None:
-    """WebSocket endpoint for real-time output (scaffold)."""
+    """WebSocket endpoint for real-time output."""
     await websocket.accept()
     logger.info("Client connected to /ws/output")
     
     try:
-        await websocket.send_json({
-            "message": "Output streaming not yet implemented",
-            "status": "scaffold",
-        })
-        
         while True:
-            data = await websocket.receive_text()
-            if data == "close":
-                break
+            # Send current decision every second
+            decision = get_current_decision()
+            if decision:
+                await websocket.send_json({
+                    "risk_state": decision.risk_state.value,
+                    "decision_confidence": decision.decision_confidence,
+                    "reason_code": decision.reason_code,
+                })
+            await asyncio.sleep(1.0)
                 
     except Exception as e:
         logger.warning(f"WebSocket error: {e}")

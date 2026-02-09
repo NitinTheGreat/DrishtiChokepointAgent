@@ -7,36 +7,7 @@ This module defines the internal state representation for the chokepoint agent.
 Core Concepts:
     - RiskState: Discrete agent states (NORMAL, BUILDUP, CRITICAL)
     - StateVector: The minimal physics-grounded metrics computed each frame
-    - AgentState: Full internal state including history for hysteresis
-
-State Vector (S_t):
-    The agent reasons over a minimal state vector computed from perception and flow:
-    
-    S_t = {
-        density,        # people / area (from perception)
-        density_slope,  # Δdensity / Δt (temporal derivative)
-        flow_pressure,  # inflow_rate / capacity
-        flow_coherence  # 1 / (1 + angular_variance)
-    }
-
-Transitions:
-    NORMAL → BUILDUP:  density > threshold_buildup OR flow_pressure > 0.8
-    BUILDUP → CRITICAL: density > threshold_critical OR flow_pressure > 1.0
-    Downward transitions require hysteresis_frames consecutive frames below threshold.
-
-Example:
-    from drishti_agent.models.state import RiskState, StateVector, AgentState
-    
-    # Create initial state
-    state = AgentState(
-        risk_state=RiskState.NORMAL,
-        current_vector=StateVector(
-            density=0.3,
-            density_slope=0.01,
-            flow_pressure=0.5,
-            flow_coherence=0.9,
-        ),
-    )
+    - AgentState: Full internal state including time-based hysteresis
 """
 
 from enum import Enum
@@ -50,8 +21,8 @@ class RiskState(str, Enum):
     Discrete risk states for the chokepoint agent.
     
     States are ordered by severity and form a simple linear hierarchy.
-    Transitions upward are immediate when thresholds are exceeded.
-    Transitions downward require sustained conditions (hysteresis).
+    Transitions upward require sustained conditions.
+    Transitions downward require recovery thresholds AND sustained conditions.
     
     Attributes:
         NORMAL: Safe conditions, no intervention needed
@@ -70,14 +41,6 @@ class StateVector(BaseModel):
     
     This is the core abstraction that separates perception from decision-making.
     The agent reasons over these four metrics, NOT over raw frames or features.
-    
-    All metrics are normalized to [0, 1] or have clear physical units.
-    
-    Formulas:
-        density = people_count / walkable_area_m2
-        density_slope = (density_t - density_{t-1}) / Δt
-        flow_pressure = inflow_rate / capacity
-        flow_coherence = 1 / (1 + angular_variance)
     
     Attributes:
         density: People per square meter in the monitored region
@@ -116,14 +79,22 @@ class AgentState(BaseModel):
     Full internal state of the chokepoint agent.
     
     This model is used by LangGraph to maintain state across frames.
-    It includes the current state vector plus history for hysteresis.
+    It includes the current state vector plus TIME-BASED hysteresis.
+    
+    Time-Based Hysteresis:
+        - state_entered_at: When we entered current risk state
+        - condition_sustained_since: When current transition condition started
+        - min_state_dwell_sec: Must stay in state this long before transitioning
+        - escalation/recovery_sustain_sec: Condition must persist this long
     
     Attributes:
         risk_state: Current discrete risk level
         current_vector: Latest computed state vector
-        previous_vector: Previous frame's state vector (for derivatives)
-        frames_in_current_state: Counter for hysteresis
-        last_transition_frame_id: Frame ID of last state change
+        previous_vector: Previous frame's state vector
+        state_entered_at: Timestamp when entered current state
+        condition_sustained_since: Timestamp when transition condition started
+        pending_transition: The state we're trying to transition to
+        last_decision_time: Timestamp of last decision
         total_frames_processed: Total frames seen by agent
     """
     
@@ -139,18 +110,27 @@ class AgentState(BaseModel):
     
     previous_vector: Optional[StateVector] = Field(
         default=None,
-        description="Previous frame's state vector (for derivatives)",
+        description="Previous frame's state vector",
     )
     
-    frames_in_current_state: int = Field(
-        default=0,
-        ge=0,
-        description="Number of consecutive frames in current state (for hysteresis)",
+    state_entered_at: float = Field(
+        default=0.0,
+        description="Timestamp when entered current risk state",
     )
     
-    last_transition_frame_id: Optional[int] = Field(
+    condition_sustained_since: Optional[float] = Field(
         default=None,
-        description="Frame ID when last state transition occurred",
+        description="Timestamp when transition condition started being met",
+    )
+    
+    pending_transition: Optional[RiskState] = Field(
+        default=None,
+        description="State we're trying to transition to (if any)",
+    )
+    
+    last_decision_time: float = Field(
+        default=0.0,
+        description="Timestamp of last decision",
     )
     
     total_frames_processed: int = Field(
@@ -159,8 +139,18 @@ class AgentState(BaseModel):
         description="Total number of frames processed by agent",
     )
     
+    # Deprecated: kept for backward compatibility
+    frames_in_current_state: int = Field(
+        default=0,
+        ge=0,
+        description="[DEPRECATED] Number of consecutive frames in current state",
+    )
+    
+    last_transition_frame_id: Optional[int] = Field(
+        default=None,
+        description="[DEPRECATED] Frame ID when last state transition occurred",
+    )
+    
     class Config:
         """Pydantic model configuration."""
-        
-        use_enum_values = False  # Keep enum as enum, not string
-
+        use_enum_values = False
