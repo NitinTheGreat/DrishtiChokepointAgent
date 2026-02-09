@@ -241,6 +241,27 @@ class LoggingConfig(BaseModel):
     format: str = Field(default="json", description="Log format: json or text")
 
 
+class ObservabilityConfig(BaseModel):
+    """Observability configuration for Phase 5."""
+    
+    enable_viz: bool = Field(
+        default=False,
+        description="Enable visualization artifacts (walkable mask, heatmap, flow vectors)",
+    )
+    heatmap_resolution: int = Field(
+        default=32,
+        ge=8,
+        le=128,
+        description="Resolution of density heatmap (NxN grid)",
+    )
+    flow_vector_spacing: int = Field(
+        default=16,
+        ge=4,
+        le=64,
+        description="Spacing between flow vectors in pixels",
+    )
+
+
 class Settings(BaseModel):
     """
     Main settings class for DrishtiChokepointAgent.
@@ -257,6 +278,7 @@ class Settings(BaseModel):
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     timing: AgentTimingConfig = Field(default_factory=AgentTimingConfig)
     physics: PhysicsConfig = Field(default_factory=PhysicsConfig)
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

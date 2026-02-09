@@ -131,6 +131,7 @@ class Analytics(BaseModel):
     Attributes:
         inflow_rate: People crossing reference line per second
         capacity: Sustainable flow capacity of the chokepoint
+        mean_flow_magnitude: Average optical flow magnitude
         direction_entropy: Measure of flow direction disorder
         density_gradient: Density across the three regions
     """
@@ -145,6 +146,12 @@ class Analytics(BaseModel):
         ...,
         gt=0.0,
         description="Sustainable flow capacity (people/second)",
+    )
+    
+    mean_flow_magnitude: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Average optical flow magnitude (pixels/frame)",
     )
     
     direction_entropy: float = Field(

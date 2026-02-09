@@ -168,3 +168,19 @@ logging:
   
   # Log format: "json" (structured) or "text" (human-readable)
   format: "json"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Observability Configuration (Phase 5)
+# ─────────────────────────────────────────────────────────────────────────────
+# Controls visualization artifacts - PURELY DESCRIPTIVE, no decision impact
+
+observability:
+  # Enable visualization artifacts (walkable mask, heatmap, flow vectors)
+  # When disabled: zero performance cost
+  enable_viz: false
+  
+  # Density heatmap resolution (NxN grid)
+  heatmap_resolution: 32
+  
+  # Spacing between flow vectors in pixels
+  flow_vector_spacing: 16

@@ -8,10 +8,13 @@ Phase 1: Stream ingestion via FrameConsumer + FrameBuffer
 Phase 2: Perception abstraction + density signal pipeline
 Phase 3: Motion physics + flow pressure/coherence signals
 Phase 4: LangGraph agent with deterministic state transitions
+Phase 5: Analytics packaging + visualization artifacts
 
 Endpoints:
     GET  /          - Service information
-    GET  /health    - Health check with stream, density, flow, and agent status
+    GET  /health    - Health check with full status
+    GET  /output    - Full agent output payload
+    WS   /ws/output - Real-time output stream
 """
 
 import asyncio
@@ -30,9 +33,19 @@ from drishti_agent.signals import DensitySignalProcessor, FlowSignalProcessor
 from drishti_agent.models.density import DensityState
 from drishti_agent.models.flow import FlowState
 from drishti_agent.models.state import StateVector
-from drishti_agent.models.output import Decision
+from drishti_agent.models.output import (
+    Decision,
+    Analytics,
+    DensityGradient,
+    Visualization,
+    AgentOutput,
+)
 from drishti_agent.agent import ChokeAgentGraph
 from drishti_agent.agent.transitions import TransitionThresholds
+from drishti_agent.observability import (
+    AnalyticsComputer,
+    VisualizationGenerator,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +70,10 @@ _flow_processor: Optional[FlowSignalProcessor] = None
 # Phase 4: Agent
 _agent: Optional[ChokeAgentGraph] = None
 
+# Phase 5: Observability
+_analytics_computer: Optional[AnalyticsComputer] = None
+_viz_generator: Optional[VisualizationGenerator] = None
+
 # Processing task
 _processing_task: Optional[asyncio.Task] = None
 
@@ -64,6 +81,8 @@ _processing_task: Optional[asyncio.Task] = None
 _current_density_state: Optional[DensityState] = None
 _current_flow_state: Optional[FlowState] = None
 _current_decision: Optional[Decision] = None
+_current_output: Optional[AgentOutput] = None
+_last_frame_id: int = -1
 
 
 def get_frame_buffer() -> Optional[FrameBuffer]:
@@ -96,29 +115,37 @@ def get_agent() -> Optional[ChokeAgentGraph]:
     return _agent
 
 
+def get_current_output() -> Optional[AgentOutput]:
+    """Get the full agent output."""
+    return _current_output
+
+
 # =============================================================================
 # Processing Pipeline
 # =============================================================================
 
 async def process_frames() -> None:
     """
-    Frame processing pipeline (Phase 2 + 3 + 4).
+    Frame processing pipeline (Phase 2 + 3 + 4 + 5).
     
-    Consumes frames from buffer, runs perception + flow + agent.
+    Consumes frames from buffer, runs perception + flow + agent + observability.
     """
     global _current_density_state, _current_flow_state, _current_decision
+    global _current_output, _last_frame_id
     
     if (
         _frame_buffer is None or 
         _perception_engine is None or 
         _density_processor is None or
         _flow_processor is None or
-        _agent is None
+        _agent is None or
+        _analytics_computer is None or
+        _viz_generator is None
     ):
         logger.error("Processing pipeline not initialized")
         return
     
-    logger.info("Frame processing pipeline started (Phase 2 + 3 + 4)")
+    logger.info("Frame processing pipeline started (Phase 2 + 3 + 4 + 5)")
     
     while True:
         try:
@@ -127,6 +154,9 @@ async def process_frames() -> None:
             
             if frame is None:
                 continue
+            
+            _last_frame_id = frame.frame_id
+            current_time = time.time()
             
             # Phase 2: Density estimation
             estimate = await _perception_engine.estimate_density(frame)
@@ -139,6 +169,9 @@ async def process_frames() -> None:
                 _current_flow_state = flow_state
             
             # Phase 4: Agent decision
+            decision: Optional[Decision] = None
+            state_vector: Optional[StateVector] = None
+            
             if _current_flow_state is not None:
                 state_vector = StateVector(
                     density=density_state.density,
@@ -149,6 +182,51 @@ async def process_frames() -> None:
                 
                 decision = _agent.process(state_vector)
                 _current_decision = decision
+            
+            # Phase 5: Analytics + Visualization
+            flow_debug = _flow_processor.debug_state
+            analytics_snapshot = _analytics_computer.compute(
+                flow_debug=flow_debug,
+                density_state=density_state,
+            )
+            
+            viz_artifacts = _viz_generator.generate(
+                density=density_state.density,
+            )
+            
+            # Build full output payload
+            if decision and state_vector:
+                # Build Analytics model
+                analytics = Analytics(
+                    inflow_rate=analytics_snapshot.inflow_rate,
+                    capacity=analytics_snapshot.capacity,
+                    mean_flow_magnitude=analytics_snapshot.mean_flow_magnitude,
+                    direction_entropy=analytics_snapshot.direction_entropy,
+                    density_gradient=DensityGradient(
+                        upstream=analytics_snapshot.density_gradient.upstream,
+                        chokepoint=analytics_snapshot.density_gradient.chokepoint,
+                        downstream=analytics_snapshot.density_gradient.downstream,
+                    ),
+                )
+                
+                # Build Visualization model (optional)
+                viz: Optional[Visualization] = None
+                if _viz_generator.is_enabled:
+                    viz = Visualization(
+                        walkable_mask=viz_artifacts.walkable_mask,
+                        density_heatmap=viz_artifacts.density_heatmap,
+                        flow_vectors=str(viz_artifacts.flow_vectors) if viz_artifacts.flow_vectors else None,
+                    )
+                
+                # Build complete output
+                _current_output = AgentOutput(
+                    timestamp=current_time,
+                    frame_id=frame.frame_id,
+                    decision=decision,
+                    state=state_vector,
+                    analytics=analytics,
+                    viz=viz,
+                )
             
         except asyncio.CancelledError:
             logger.info("Frame processing pipeline stopping")
@@ -170,6 +248,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _frame_buffer, _frame_consumer, _consumer_task
     global _perception_engine, _density_processor
     global _flow_processor, _agent, _processing_task
+    global _analytics_computer, _viz_generator
     
     # Startup
     logger.info(f"Starting {settings.agent.name} {settings.agent.version}")
@@ -203,9 +282,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     
     # Phase 3: Flow processing
+    capacity = settings.motion.capacity_factor * settings.motion.chokepoint_width
     logger.info(
         f"Motion: width={settings.motion.chokepoint_width}m, "
-        f"capacity_factor={settings.motion.capacity_factor}"
+        f"capacity={capacity:.2f}/s"
     )
     _flow_processor = FlowSignalProcessor(
         chokepoint_width=settings.motion.chokepoint_width,
@@ -232,8 +312,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _agent = ChokeAgentGraph(thresholds=thresholds)
     logger.info(
         f"Agent: dwell={settings.timing.min_state_dwell_sec}s, "
-        f"escalation={settings.timing.escalation_sustain_sec}s, "
-        f"recovery={settings.timing.recovery_sustain_sec}s"
+        f"escalation={settings.timing.escalation_sustain_sec}s"
+    )
+    
+    # Phase 5: Observability
+    _analytics_computer = AnalyticsComputer(capacity=capacity)
+    _viz_generator = VisualizationGenerator(
+        enabled=settings.observability.enable_viz,
+        heatmap_resolution=settings.observability.heatmap_resolution,
+        flow_vector_spacing=settings.observability.flow_vector_spacing,
+    )
+    logger.info(
+        f"Observability: viz_enabled={settings.observability.enable_viz}, "
+        f"heatmap={settings.observability.heatmap_resolution}x{settings.observability.heatmap_resolution}"
     )
     
     # Start processing pipeline
@@ -242,7 +333,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         name="frame_processing"
     )
     
-    logger.info("All components started (Phase 1+2+3+4)")
+    logger.info("All components started (Phase 1+2+3+4+5)")
     
     yield
     
@@ -296,13 +387,13 @@ async def root() -> JSONResponse:
         "version": settings.agent.version,
         "name": settings.agent.name,
         "status": "running",
-        "phase": 4,
+        "phase": 5,
     })
 
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    """Health check with Phase 1 + 2 + 3 + 4 status."""
+    """Health check with Phase 1 + 2 + 3 + 4 + 5 status."""
     # Phase 1: Stream metrics
     consumer = get_frame_consumer()
     buffer = get_frame_buffer()
@@ -360,6 +451,9 @@ async def health() -> JSONResponse:
     if agent:
         agent_metrics["total_frames"] = agent.agent_state.total_frames_processed
     
+    # Phase 5: Observability
+    viz_enabled = settings.observability.enable_viz
+    
     # Determine overall health
     is_healthy = (
         stream_metrics.get("stream_connected", False) or 
@@ -372,7 +466,22 @@ async def health() -> JSONResponse:
         **density_metrics,
         **flow_metrics,
         **agent_metrics,
+        "viz_enabled": viz_enabled,
     })
+
+
+@app.get("/output")
+async def output() -> JSONResponse:
+    """Get full agent output payload."""
+    current_output = get_current_output()
+    
+    if current_output is None:
+        return JSONResponse(
+            {"error": "No output available yet"},
+            status_code=503,
+        )
+    
+    return JSONResponse(current_output.model_dump(mode="json"))
 
 
 # =============================================================================
@@ -387,14 +496,10 @@ async def output_stream(websocket: WebSocket) -> None:
     
     try:
         while True:
-            # Send current decision every second
-            decision = get_current_decision()
-            if decision:
-                await websocket.send_json({
-                    "risk_state": decision.risk_state.value,
-                    "decision_confidence": decision.decision_confidence,
-                    "reason_code": decision.reason_code,
-                })
+            # Send current output every second
+            current_output = get_current_output()
+            if current_output:
+                await websocket.send_json(current_output.model_dump(mode="json"))
             await asyncio.sleep(1.0)
                 
     except Exception as e:
