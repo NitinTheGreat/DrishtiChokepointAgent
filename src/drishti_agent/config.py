@@ -106,6 +106,41 @@ class PerceptionConfig(BaseModel):
     mock: MockPerceptionConfig = Field(default_factory=MockPerceptionConfig)
 
 
+class MotionConfig(BaseModel):
+    """Motion and optical flow configuration (Phase 3)."""
+    
+    optical_flow_method: str = Field(
+        default="farneback",
+        description="Optical flow method: 'farneback' or 'tvl1'",
+    )
+    magnitude_threshold: float = Field(
+        default=0.5,
+        ge=0,
+        description="Minimum flow magnitude for coherence computation",
+    )
+    coherence_smoothing_alpha: float = Field(
+        default=0.3,
+        gt=0,
+        le=1.0,
+        description="EMA smoothing factor for coherence",
+    )
+    min_active_flow_threshold: float = Field(
+        default=0.3,
+        ge=0,
+        description="Minimum mean magnitude for active scene detection",
+    )
+    chokepoint_width: float = Field(
+        default=3.0,
+        gt=0,
+        description="Chokepoint width in meters",
+    )
+    capacity_factor: float = Field(
+        default=1.3,
+        gt=0,
+        description="Capacity factor k (persons/meter/second)",
+    )
+
+
 class GeometryConfig(BaseModel):
     """Geometry configuration."""
     
@@ -193,6 +228,7 @@ class Settings(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     stream: StreamConfig = Field(default_factory=StreamConfig)
     perception: PerceptionConfig = Field(default_factory=PerceptionConfig)
+    motion: MotionConfig = Field(default_factory=MotionConfig)
     geometry: GeometryConfig = Field(default_factory=GeometryConfig)
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     physics: PhysicsConfig = Field(default_factory=PhysicsConfig)

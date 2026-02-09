@@ -5,32 +5,24 @@ Optical Flow Estimation
 Classical optical flow computation for motion analysis.
 
 This module provides optical flow estimation using OpenCV's
-Farnebäck and TV-L1 algorithms. The output is a dense flow field
-that is used to compute aggregate motion metrics.
+Farnebäck algorithm. The output is a dense flow field
+used to compute aggregate motion metrics.
 
 Key Design Decisions:
     - Optical flow is used ONLY for aggregate metrics
     - No individual tracking or trajectory computation
-    - TV-L1 preferred for accuracy, Farnebäck for speed
     - Output is the raw flow field (dx, dy per pixel)
-
-Example:
-    from drishti_agent.flow import FarnebackFlowEstimator
-    
-    estimator = FarnebackFlowEstimator()
-    
-    # Compute flow between consecutive frames
-    flow = estimator.compute(prev_frame, curr_frame)
-    
-    # flow.dx and flow.dy are (H, W) numpy arrays
-    print(f"Mean horizontal flow: {flow.dx.mean():.2f}")
 """
 
-from abc import ABC, abstractmethod
+import logging
 from typing import Optional, Protocol
 
+import cv2
 import numpy as np
 from pydantic import BaseModel, Field
+
+
+logger = logging.getLogger(__name__)
 
 
 class FlowField(BaseModel):
@@ -43,10 +35,6 @@ class FlowField(BaseModel):
     Attributes:
         dx: Horizontal displacement (positive = rightward)
         dy: Vertical displacement (positive = downward)
-        
-    Note:
-        This model uses Config(arbitrary_types_allowed=True) to
-        allow numpy arrays.
     """
     
     dx: np.ndarray = Field(
@@ -79,6 +67,8 @@ class OpticalFlowEstimator(Protocol):
     Protocol for optical flow estimation backends.
     
     All implementations must compute dense flow between two frames.
+    This abstraction allows swapping Farnebäck for TV-L1 or other
+    methods without changing downstream code.
     """
     
     def compute(
@@ -91,8 +81,8 @@ class OpticalFlowEstimator(Protocol):
         Compute optical flow between two consecutive frames.
         
         Args:
-            prev_frame: Previous grayscale frame (H, W)
-            curr_frame: Current grayscale frame (H, W)
+            prev_frame: Previous grayscale frame (H, W), uint8
+            curr_frame: Current grayscale frame (H, W), uint8
             mask: Optional mask for flow computation region
             
         Returns:
@@ -147,6 +137,11 @@ class FarnebackFlowEstimator:
         self.iterations = iterations
         self.poly_n = poly_n
         self.poly_sigma = poly_sigma
+        
+        logger.info(
+            f"FarnebackFlowEstimator initialized: "
+            f"winsize={winsize}, levels={levels}, iterations={iterations}"
+        )
     
     def compute(
         self,
@@ -160,26 +155,56 @@ class FarnebackFlowEstimator:
         Args:
             prev_frame: Previous grayscale frame (H, W), uint8
             curr_frame: Current grayscale frame (H, W), uint8
-            mask: Optional mask (ignored in this implementation)
+            mask: Optional mask (applied after computation)
             
         Returns:
             FlowField with dense displacement
             
-        TODO: Implement OpenCV call
+        Raises:
+            ValueError: If frames have invalid shape or dtype
         """
-        # TODO: Implement using OpenCV
-        # import cv2
-        # flow = cv2.calcOpticalFlowFarneback(
-        #     prev_frame, curr_frame, None,
-        #     self.pyr_scale, self.levels, self.winsize,
-        #     self.iterations, self.poly_n, self.poly_sigma, 0
-        # )
-        # return FlowField(dx=flow[..., 0], dy=flow[..., 1])
+        # Validate inputs
+        if prev_frame.ndim != 2 or curr_frame.ndim != 2:
+            raise ValueError(
+                f"Frames must be 2D grayscale. Got shapes: "
+                f"{prev_frame.shape}, {curr_frame.shape}"
+            )
         
-        raise NotImplementedError(
-            "FarnebackFlowEstimator.compute not yet implemented. "
-            "Add OpenCV integration in implementation phase."
+        if prev_frame.shape != curr_frame.shape:
+            raise ValueError(
+                f"Frame shapes must match. Got: "
+                f"{prev_frame.shape} vs {curr_frame.shape}"
+            )
+        
+        if prev_frame.dtype != np.uint8 or curr_frame.dtype != np.uint8:
+            raise ValueError(
+                f"Frames must be uint8. Got: "
+                f"{prev_frame.dtype}, {curr_frame.dtype}"
+            )
+        
+        # Compute optical flow
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_frame,
+            curr_frame,
+            None,  # flow output (will be created)
+            self.pyr_scale,
+            self.levels,
+            self.winsize,
+            self.iterations,
+            self.poly_n,
+            self.poly_sigma,
+            0,  # flags
         )
+        
+        dx = flow[..., 0]
+        dy = flow[..., 1]
+        
+        # Apply mask if provided
+        if mask is not None:
+            dx = np.where(mask, dx, 0.0)
+            dy = np.where(mask, dy, 0.0)
+        
+        return FlowField(dx=dx, dy=dy)
 
 
 class TVL1FlowEstimator:
@@ -193,14 +218,14 @@ class TVL1FlowEstimator:
         Zach, C., Pock, T., & Bischof, H. (2007). A Duality Based
         Approach for Realtime TV-L1 Optical Flow. Pattern Recognition.
     
-    TODO: Implement in production phase
+    Note: Not implemented in Phase 3 - Farnebäck is sufficient.
     """
     
     def __init__(self) -> None:
         """Initialize TV-L1 flow estimator."""
-        # TODO: Initialize cv2.optflow.DualTVL1OpticalFlow_create()
         raise NotImplementedError(
-            "TVL1FlowEstimator not yet implemented."
+            "TVL1FlowEstimator not yet implemented. "
+            "Use FarnebackFlowEstimator for Phase 3."
         )
     
     def compute(

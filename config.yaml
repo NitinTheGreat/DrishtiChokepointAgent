@@ -56,6 +56,28 @@ perception:
     fixed_density: 0.35
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Motion Configuration (Phase 3)
+# ─────────────────────────────────────────────────────────────────────────────
+motion:
+  # Optical flow method: 'farneback' or 'tvl1'
+  optical_flow_method: "farneback"
+  
+  # Minimum flow magnitude for coherence computation (pixels/frame)
+  magnitude_threshold: 0.5
+  
+  # EMA smoothing factor for coherence (0, 1]
+  coherence_smoothing_alpha: 0.3
+  
+  # Minimum mean magnitude for active scene detection
+  min_active_flow_threshold: 0.3
+  
+  # Chokepoint width in meters
+  chokepoint_width: 3.0
+  
+  # Capacity factor k (persons/meter/second)
+  capacity_factor: 1.3
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Geometry Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 geometry:
