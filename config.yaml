@@ -38,7 +38,7 @@ stream:
 perception:
   # Backend for occupancy/density estimation
   # Options: "mock" (testing), "vision" (Google Cloud Vision API)
-  backend: "mock"
+  backend: "vision"
   
   # Region of interest area in square meters (for density calculation)
   roi_area: 42.0
@@ -68,7 +68,7 @@ perception:
     confidence_threshold: 0.6
     
     # Path to service account JSON (null = use ADC / default credentials)
-    credentials_path: null
+    credentials_path: "drishti-vision-sa..json"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Motion Configuration (Phase 3)
@@ -192,7 +192,7 @@ logging:
 observability:
   # Enable visualization artifacts (walkable mask, heatmap, flow vectors)
   # When disabled: zero performance cost
-  enable_viz: false
+  enable_viz: true
   
   # Density heatmap resolution (NxN grid)
   heatmap_resolution: 32

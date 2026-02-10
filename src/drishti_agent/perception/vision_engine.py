@@ -221,8 +221,11 @@ class VisionPerceptionEngine:
         """
         from google.cloud import vision
         
-        # Build image from frame data
-        image = vision.Image(content=frame.jpeg_data)
+        # Frame stores base64-encoded JPEG in image_b64 — decode to raw bytes
+        jpeg_bytes = base64.b64decode(frame.image_b64)
+        
+        # Build image from raw JPEG bytes
+        image = vision.Image(content=jpeg_bytes)
         
         # Run object detection
         response = await asyncio.to_thread(
