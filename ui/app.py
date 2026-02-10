@@ -31,16 +31,15 @@ import numpy as np
 import requests
 import streamlit as st
 
-# ─── websockets import (async ws client) ──────────────────────────────────────
+# ─── websockets import ────────────────────────────────────────────────────────
 try:
-    import websockets
-    import websockets.sync.client as ws_sync
+    from websockets.sync.client import connect as ws_connect
     _WS_AVAILABLE = True
 except ImportError:
     _WS_AVAILABLE = False
 
 # =============================================================================
-# Configuration — only two env vars, everything else lives in agent config.yaml
+# Configuration
 # =============================================================================
 
 STREAM_URL = os.getenv("DRISHTI_STREAM_URL", "ws://localhost:8000/ws/stream")
@@ -57,29 +56,33 @@ st.set_page_config(
 )
 
 # =============================================================================
-# Thread-safe global frame store
-# Streamlit reruns the script on every interaction; st.session_state is NOT
-# visible to background threads reliably.  We use a module-level dict
-# protected by a threading.Lock instead.
+# Persistent shared state — survives Streamlit reruns via @st.cache_resource.
+# Module-level dicts get wiped on every rerun; this does not.
 # =============================================================================
 
-_lock = threading.Lock()
-_shared: dict = {
-    "frame": None,          # latest BGR np.ndarray
-    "frame_count": 0,
-    "ws_status": "Disconnected",
-    "running": False,
-}
+@st.cache_resource
+def _get_shared():
+    """Create a persistent shared state dict + lock that survives reruns."""
+    return {
+        "lock": threading.Lock(),
+        "frame": None,          # latest BGR np.ndarray
+        "frame_count": 0,
+        "ws_status": "Disconnected",
+        "running": False,
+        "thread": None,
+    }
+
+SHARED = _get_shared()
 
 
-def _get(key: str):
-    with _lock:
-        return _shared.get(key)
+def _sget(key: str):
+    with SHARED["lock"]:
+        return SHARED.get(key)
 
 
-def _set(key: str, value):
-    with _lock:
-        _shared[key] = value
+def _sset(key: str, value):
+    with SHARED["lock"]:
+        SHARED[key] = value
 
 
 # =============================================================================
@@ -87,53 +90,41 @@ def _set(key: str, value):
 # =============================================================================
 
 def fetch_agent_output() -> Optional[dict]:
-    """Poll agent /output endpoint for latest analytics + viz."""
     try:
         r = requests.get(f"{AGENT_URL}/output", timeout=2)
-        if r.status_code == 200:
-            return r.json()
+        return r.json() if r.status_code == 200 else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 def fetch_agent_root() -> Optional[dict]:
-    """Get agent root info (includes perception_backend)."""
     try:
         r = requests.get(AGENT_URL, timeout=2)
-        if r.status_code == 200:
-            return r.json()
+        return r.json() if r.status_code == 200 else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 def fetch_agent_health() -> bool:
-    """Check agent liveness."""
     try:
-        r = requests.get(f"{AGENT_URL}/health", timeout=2)
-        return r.status_code == 200
+        return requests.get(f"{AGENT_URL}/health", timeout=2).status_code == 200
     except Exception:
         return False
 
 # =============================================================================
-# WebSocket frame reader — synchronous version running in a daemon thread.
-# Uses websockets.sync.client so no asyncio event loop is needed.
+# WebSocket reader thread — uses websockets.sync.client (no asyncio needed).
+# Writes frames into the SHARED dict which persists across Streamlit reruns.
 # =============================================================================
 
 def _ws_reader_thread():
-    """
-    Background thread: connects to DrishtiStream WebSocket, decodes
-    base64 JPEG frames into OpenCV BGR images, stores the latest one
-    in the thread-safe _shared dict.
-    """
-    _set("ws_status", "Connecting…")
+    _sset("ws_status", "Connecting…")
 
-    while _get("running"):
+    while _sget("running"):
         try:
-            with ws_sync.connect(STREAM_URL, max_size=10 * 1024 * 1024) as ws:
-                _set("ws_status", "Connected")
-                while _get("running"):
+            ws = ws_connect(STREAM_URL, max_size=10 * 1024 * 1024)
+            _sset("ws_status", "Connected")
+            try:
+                while _sget("running"):
                     try:
                         raw_msg = ws.recv(timeout=2.0)
                     except TimeoutError:
@@ -145,30 +136,30 @@ def _ws_reader_thread():
                         if not b64_img:
                             continue
 
-                        # Decode base64 JPEG → OpenCV BGR
                         jpg_bytes = base64.b64decode(b64_img)
                         arr = np.frombuffer(jpg_bytes, dtype=np.uint8)
                         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
                         if frame is not None:
-                            with _lock:
-                                _shared["frame"] = frame
-                                _shared["frame_count"] += 1
+                            with SHARED["lock"]:
+                                SHARED["frame"] = frame
+                                SHARED["frame_count"] += 1
                     except Exception:
-                        continue  # drop bad frames silently
+                        continue
+            finally:
+                ws.close()
 
         except Exception:
-            _set("ws_status", "Reconnecting…")
+            _sset("ws_status", "Reconnecting…")
             time.sleep(1.0)
 
-    _set("ws_status", "Disconnected")
+    _sset("ws_status", "Disconnected")
 
 # =============================================================================
 # Overlay helpers
 # =============================================================================
 
 def decode_walkable_mask(b64_str: Optional[str]) -> Optional[dict]:
-    """Decode base64-encoded JSON walkable area polygon."""
     if not b64_str:
         return None
     try:
@@ -178,7 +169,6 @@ def decode_walkable_mask(b64_str: Optional[str]) -> Optional[dict]:
 
 
 def decode_heatmap_grid(b64_str: Optional[str]) -> Optional[np.ndarray]:
-    """Decode base64-encoded JSON heatmap grid into numpy array."""
     if not b64_str:
         return None
     try:
@@ -190,11 +180,6 @@ def decode_heatmap_grid(b64_str: Optional[str]) -> Optional[np.ndarray]:
 
 
 def _parse_flow_vectors(raw) -> list:
-    """
-    Parse flow vectors from agent output.
-    The backend may serialize as a Python repr string (with np.float64)
-    or as a proper list.
-    """
     if isinstance(raw, list):
         return raw
     if not isinstance(raw, str) or not raw.strip():
@@ -219,9 +204,8 @@ def _parse_flow_vectors(raw) -> list:
     except Exception:
         return []
 
-
 # =============================================================================
-# Composition pipeline
+# Frame composition
 # =============================================================================
 
 def composite_frame(
@@ -231,23 +215,14 @@ def composite_frame(
     show_heatmap: bool,
     show_vectors: bool,
 ) -> np.ndarray:
-    """
-    Composite all overlays ON TOP of the video frame.
-
-    Order (bottom to top):
-        1. Video frame (base layer)
-        2. Walkable area mask (alpha ~0.15)
-        3. Chokepoint boundary lines
-        4. Density heatmap (alpha ~0.35)
-        5. Flow vectors (arrows)
-    """
+    """Composite overlays ON TOP of the video frame. Single image out."""
     h, w = frame.shape[:2]
     result = frame.copy()
 
     if viz is None:
         return result
 
-    # ── 1 & 2. Walkable area mask + boundary lines ────────────────────────────
+    # 1. Walkable area + boundary lines
     if show_geometry:
         mask_data = decode_walkable_mask(viz.get("walkable_mask"))
         if mask_data and "vertices" in mask_data:
@@ -256,85 +231,70 @@ def composite_frame(
                 [[int(v["x"] * w / 320), int(v["y"] * h / 240)] for v in verts],
                 dtype=np.int32,
             )
-            # Green fill
             overlay = result.copy()
             cv2.fillPoly(overlay, [pts], (0, 180, 0))
             cv2.addWeighted(overlay, 0.15, result, 0.85, 0, result)
+            cv2.polylines(result, [pts], True, (0, 255, 255), 2)
 
-            # Boundary lines
-            cv2.polylines(result, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
-
-            # Reference line
             center = mask_data.get("center", {})
-            cx = int(center.get("x", 160) * w / 320)
             cy = int(center.get("y", 120) * h / 240)
             cv2.line(result, (0, cy), (w, cy), (255, 255, 0), 1, cv2.LINE_AA)
-            cv2.putText(
-                result, "REF LINE", (8, cy - 6),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1, cv2.LINE_AA,
-            )
+            cv2.putText(result, "REF LINE", (8, cy - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
 
-    # ── 3. Density heatmap ────────────────────────────────────────────────────
+    # 2. Density heatmap
     if show_heatmap:
         grid = decode_heatmap_grid(viz.get("density_heatmap"))
         if grid is not None:
-            grid_norm = np.clip(grid / 1.5, 0, 1)
-            grid_u8 = (grid_norm * 255).astype(np.uint8)
-            heatmap_resized = cv2.resize(grid_u8, (w, h), interpolation=cv2.INTER_LINEAR)
-            heatmap_color = cv2.applyColorMap(heatmap_resized, cv2.COLORMAP_JET)
-            cv2.addWeighted(heatmap_color, 0.35, result, 0.65, 0, result)
+            grid_u8 = (np.clip(grid / 1.5, 0, 1) * 255).astype(np.uint8)
+            hm = cv2.resize(grid_u8, (w, h), interpolation=cv2.INTER_LINEAR)
+            hm_color = cv2.applyColorMap(hm, cv2.COLORMAP_JET)
+            cv2.addWeighted(hm_color, 0.35, result, 0.65, 0, result)
 
-    # ── 4. Flow vectors ───────────────────────────────────────────────────────
+    # 3. Flow vectors
     if show_vectors:
         vectors = _parse_flow_vectors(viz.get("flow_vectors"))
-        if vectors:
-            for vec in vectors:
-                try:
-                    x = int(vec["x"] * w / 320)
-                    y = int(vec["y"] * h / 240)
-                    dx = vec.get("dx", 0) * w / 320 * 8
-                    dy = vec.get("dy", 0) * h / 240 * 8
-                    mag = vec.get("magnitude", 0)
-                    t = min(mag / 4.0, 1.0)
-                    color = (0, int(255 * (1 - t)), int(255 * t))
-                    cv2.arrowedLine(
-                        result, (x, y), (int(x + dx), int(y + dy)),
-                        color, 1, cv2.LINE_AA, tipLength=0.3,
-                    )
-                except (KeyError, TypeError):
-                    continue
+        for vec in vectors:
+            try:
+                x = int(vec["x"] * w / 320)
+                y = int(vec["y"] * h / 240)
+                dx = vec.get("dx", 0) * w / 320 * 8
+                dy = vec.get("dy", 0) * h / 240 * 8
+                mag = vec.get("magnitude", 0)
+                t = min(mag / 4.0, 1.0)
+                color = (0, int(255 * (1 - t)), int(255 * t))
+                cv2.arrowedLine(result, (x, y), (int(x + dx), int(y + dy)),
+                                color, 1, cv2.LINE_AA, tipLength=0.3)
+            except (KeyError, TypeError):
+                continue
 
     return result
-
 
 # =============================================================================
 # Main UI
 # =============================================================================
 
 def main():
-    # ── Session state init ────────────────────────────────────────────────────
-    if "started" not in st.session_state:
-        st.session_state.started = False
-
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Controls")
 
+        is_running = _sget("running")
+
         col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("▶ Start", disabled=st.session_state.started, use_container_width=True):
+            if st.button("▶ Start", disabled=bool(is_running), use_container_width=True):
                 if not _WS_AVAILABLE:
                     st.error("pip install websockets")
                 else:
-                    st.session_state.started = True
-                    _set("running", True)
+                    _sset("running", True)
                     t = threading.Thread(target=_ws_reader_thread, daemon=True)
                     t.start()
+                    SHARED["thread"] = t
                     st.rerun()
         with col_b:
-            if st.button("⏹ Stop", disabled=not st.session_state.started, use_container_width=True):
-                st.session_state.started = False
-                _set("running", False)
+            if st.button("⏹ Stop", disabled=not is_running, use_container_width=True):
+                _sset("running", False)
                 st.rerun()
 
         st.divider()
@@ -355,15 +315,14 @@ def main():
     # ── Top Bar ───────────────────────────────────────────────────────────────
     top1, top2, top3, top4 = st.columns([2, 2, 2, 2])
 
-    agent_alive = fetch_agent_health()
     with top1:
-        if agent_alive:
+        if fetch_agent_health():
             st.success("🟢 Agent Online")
         else:
             st.error("🔴 Agent Offline")
 
     with top2:
-        ws = _get("ws_status")
+        ws = _sget("ws_status")
         if ws == "Connected":
             st.success(f"🟢 Stream: {ws}")
         elif "Reconnect" in str(ws) or "Connect" in str(ws):
@@ -384,27 +343,25 @@ def main():
     with top4:
         if output and "decision" in output:
             risk = output["decision"].get("risk_state", "UNKNOWN")
-            colors = {"NORMAL": "🟢", "BUILDUP": "🟠", "CRITICAL": "🔴"}
-            st.markdown(f"**Risk:** {colors.get(risk, '⚪')} **{risk}**")
+            icons = {"NORMAL": "🟢", "BUILDUP": "🟠", "CRITICAL": "🔴"}
+            st.markdown(f"**Risk:** {icons.get(risk, '⚪')} **{risk}**")
         else:
             st.markdown("**Risk:** ⚪ WAITING")
 
     st.divider()
 
-    # ── Main Layout: Video + Metrics ──────────────────────────────────────────
+    # ── Main Layout ───────────────────────────────────────────────────────────
     left_col, right_col = st.columns([3, 1])
 
     with left_col:
-        frame = _get("frame")
+        frame = _sget("frame")
         viz = output.get("viz") if output else None
-        fc = _get("frame_count")
+        fc = _sget("frame_count")
 
         if frame is not None:
-            composited = composite_frame(
-                frame, viz, show_geometry, show_heatmap, show_vectors,
-            )
-            composited_rgb = cv2.cvtColor(composited, cv2.COLOR_BGR2RGB)
-            st.image(composited_rgb, caption=f"Frame #{fc}", use_container_width=True)
+            composited = composite_frame(frame, viz, show_geometry, show_heatmap, show_vectors)
+            st.image(cv2.cvtColor(composited, cv2.COLOR_BGR2RGB),
+                     caption=f"Frame #{fc}", use_container_width=True)
         else:
             ph = np.full((480, 640, 3), 40, dtype=np.uint8)
             cv2.putText(ph, "Waiting for video stream...", (100, 230),
@@ -445,7 +402,7 @@ def main():
             st.warning("No agent output yet")
 
     # ── Auto-refresh ──────────────────────────────────────────────────────────
-    if st.session_state.started:
+    if _sget("running"):
         time.sleep(refresh_rate)
         st.rerun()
 
