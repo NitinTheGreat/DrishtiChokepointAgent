@@ -176,6 +176,12 @@ pip install google-cloud-vision>=3.7.0
 ```bash
 # Start with mock perception (default)
 uvicorn src.drishti_agent.main:app --host 0.0.0.0 --port 8001
+OR
+$env:PYTHONPATH = "src"; .\.venv\Scripts\python.exe -m uvicorn drishti_agent.main:app --host 0.0.0.0 --port 8001
+
+and for viewer.py:
+.venv\Scripts\python.exe viewer.py
+
 
 # Verify health
 curl http://localhost:8001/health
