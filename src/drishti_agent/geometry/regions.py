@@ -28,7 +28,7 @@ Example:
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from drishti_agent.models.geometry import (
     Chokepoint,
@@ -39,6 +39,64 @@ from drishti_agent.models.geometry import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Standalone Geometry Functions
+# =============================================================================
+
+def point_in_polygon_test(px: float, py: float, polygon: Polygon) -> bool:
+    """
+    Test if a point (px, py) is inside a polygon using ray casting.
+    
+    Casts a ray from the point rightward (+x direction) and counts
+    how many polygon edges it crosses. Odd count = inside.
+    
+    Args:
+        px: X coordinate of the test point
+        py: Y coordinate of the test point
+        polygon: Polygon to test against
+        
+    Returns:
+        True if the point is inside the polygon
+    """
+    n = len(polygon.vertices)
+    inside = False
+    
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon.vertices[i].x, polygon.vertices[i].y
+        xj, yj = polygon.vertices[j].x, polygon.vertices[j].y
+        
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    
+    return inside
+
+
+def shoelace_area(polygon: Polygon) -> float:
+    """
+    Compute the area of a polygon using the shoelace formula.
+    
+    Formula: A = 0.5 * |Σ(x_i * y_{i+1} - x_{i+1} * y_i)|
+    
+    Args:
+        polygon: Polygon with ordered vertices
+        
+    Returns:
+        Area in square pixels (always positive)
+    """
+    n = len(polygon.vertices)
+    area = 0.0
+    
+    for i in range(n):
+        j = (i + 1) % n
+        xi, yi = polygon.vertices[i].x, polygon.vertices[i].y
+        xj, yj = polygon.vertices[j].x, polygon.vertices[j].y
+        area += xi * yj - xj * yi
+    
+    return abs(area) / 2.0
 
 
 class GeometryManager:
@@ -110,7 +168,8 @@ class GeometryManager:
         """
         Check if a point is inside a polygon.
         
-        Uses the ray casting algorithm.
+        Uses the ray casting algorithm: cast a ray from the point
+        rightward and count edge crossings. Odd count = inside.
         
         Args:
             point: The point to test
@@ -118,37 +177,23 @@ class GeometryManager:
             
         Returns:
             True if point is inside polygon
-        
-        TODO: Implement ray casting or use shapely
         """
-        # TODO: Implement point-in-polygon algorithm
-        # Options:
-        # 1. Use shapely: Polygon(vertices).contains(Point(x, y))
-        # 2. Implement ray casting manually for zero dependencies
-        raise NotImplementedError(
-            "point_in_polygon not yet implemented. "
-            "Consider using shapely for production."
-        )
+        return point_in_polygon_test(point.x, point.y, polygon)
     
     def compute_polygon_area(self, polygon: Polygon) -> float:
         """
         Compute the area of a polygon in square pixels.
         
-        Uses the shoelace formula.
+        Uses the shoelace formula (Gauss's area formula):
+            A = 0.5 * |Σ(x_i * y_{i+1} - x_{i+1} * y_i)|
         
         Args:
             polygon: The polygon to measure
             
         Returns:
-            Area in square pixels
-            
-        TODO: Implement shoelace formula
+            Area in square pixels (always positive)
         """
-        # TODO: Implement shoelace formula
-        # area = 0.5 * abs(sum(x_i * y_{i+1} - x_{i+1} * y_i))
-        raise NotImplementedError(
-            "compute_polygon_area not yet implemented."
-        )
+        return shoelace_area(polygon)
     
     def compute_polygon_area_meters(
         self,

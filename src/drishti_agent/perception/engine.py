@@ -136,4 +136,5 @@ class MockPerceptionEngine:
             area=self.roi_area,
             density=density,
             timestamp=frame.timestamp,
+            centroids=None,  # Mock engine has no spatial information
         )

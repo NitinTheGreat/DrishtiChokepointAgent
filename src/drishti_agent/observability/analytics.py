@@ -34,8 +34,9 @@ class DensityGradientAnalytics:
     """
     Density gradient across chokepoint regions.
     
-    In production, this would come from region-specific perception.
-    For now, we use a uniform mock based on global density.
+    When geometry and centroids are available, these values are
+    computed from real per-region centroid counts. Otherwise,
+    falls back to proportional estimates from global density.
     """
     
     upstream: float
@@ -119,9 +120,27 @@ class AnalyticsComputer:
             # Default: moderate entropy
             direction_entropy = 0.3
         
-        # Compute density gradient (mock: uniform based on global density)
+        # Compute density gradient
+        # Use real region densities if available (from geometry + centroids)
+        # Otherwise fall back to proportional estimate
         density = density_state.density if density_state else 0.0
-        density_gradient = self._compute_mock_gradient(density)
+        
+        if density_state and density_state.region_densities:
+            # REAL per-region density from centroids + geometry
+            density_gradient = DensityGradientAnalytics(
+                upstream=round(
+                    max(0, density_state.region_densities.get("upstream", 0.0)), 4
+                ),
+                chokepoint=round(
+                    max(0, density_state.region_densities.get("chokepoint", 0.0)), 4
+                ),
+                downstream=round(
+                    max(0, density_state.region_densities.get("downstream", 0.0)), 4
+                ),
+            )
+        else:
+            # Fallback: proportional estimate from global density
+            density_gradient = self._compute_estimated_gradient(density)
         
         return AnalyticsSnapshot(
             inflow_rate=round(inflow_rate, 4),
@@ -131,17 +150,28 @@ class AnalyticsComputer:
             density_gradient=density_gradient,
         )
     
-    def _compute_mock_gradient(self, global_density: float) -> DensityGradientAnalytics:
+    def _compute_estimated_gradient(
+        self, global_density: float
+    ) -> DensityGradientAnalytics:
         """
-        Compute mock density gradient.
+        Compute estimated density gradient from global density.
         
-        In production, this would use region-specific perception.
-        For now, we assume:
-        - Upstream slightly higher than global
-        - Chokepoint at global
-        - Downstream slightly lower
+        Used as fallback when geometry or centroids are unavailable.
+        Assumes a typical bottleneck pattern:
+        - Upstream slightly higher than global (buildup)
+        - Chokepoint at global density
+        - Downstream slightly lower (clearing)
+        
+        Note: This is an ESTIMATE, not measured data. It is clearly
+        distinguished from the real region-specific density computed
+        when geometry + centroids are available.
+        
+        Args:
+            global_density: Global density value (persons/m²)
+            
+        Returns:
+            Estimated density gradient
         """
-        # Mock gradient pattern (typical bottleneck)
         upstream = global_density * 1.1  # Slight buildup
         chokepoint = global_density
         downstream = global_density * 0.7  # Clearing

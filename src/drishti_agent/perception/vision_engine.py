@@ -20,7 +20,7 @@ import asyncio
 import base64
 import logging
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from drishti_agent.stream.frame import Frame
 from drishti_agent.models.density import DensityEstimate
@@ -159,7 +159,7 @@ class VisionPerceptionEngine:
         
         # Call Vision API
         try:
-            people_count = await self._detect_people(frame)
+            people_count, centroids = await self._detect_people(frame)
             self._api_call_count += 1
             self._last_call_time = time.time()
             
@@ -174,10 +174,17 @@ class VisionPerceptionEngine:
                 area=self.roi_area,
                 density=density,
                 timestamp=frame.timestamp,
+                centroids=centroids if centroids else None,
             )
             
-            # Cache for skipped frames
-            self._last_estimate = estimate
+            # Cache WITHOUT centroids — centroids are transient
+            self._last_estimate = DensityEstimate(
+                people_count=people_count,
+                area=self.roi_area,
+                density=density,
+                timestamp=frame.timestamp,
+                centroids=None,
+            )
             
             logger.debug(
                 f"Vision API: frame={frame.frame_id}, "
@@ -209,7 +216,7 @@ class VisionPerceptionEngine:
                     timestamp=frame.timestamp,
                 )
     
-    async def _detect_people(self, frame: Frame) -> int:
+    async def _detect_people(self, frame: Frame) -> Tuple[int, List[Tuple[float, float]]]:
         """
         Detect people in frame using Vision API.
         
@@ -217,7 +224,9 @@ class VisionPerceptionEngine:
             frame: Frame with JPEG image data
             
         Returns:
-            Number of detected people
+            Tuple of (people_count, centroids) where centroids are
+            normalized (0-1) bounding polygon center coordinates.
+            Centroids are transient — NOT stored beyond this call.
         """
         from google.cloud import vision
         
@@ -236,14 +245,24 @@ class VisionPerceptionEngine:
         if response.error.message:
             raise VisionAPIError(f"Vision API: {response.error.message}")
         
-        # Count people
+        # Count people and extract centroids
         people_count = 0
+        centroids: List[Tuple[float, float]] = []
+        
         for obj in response.localized_object_annotations:
             if obj.name.lower() == "person":
                 if obj.score >= self.person_confidence_threshold:
                     people_count += 1
+                    
+                    # Extract centroid from normalized bounding polygon
+                    # Vision API returns normalized vertices (0-1)
+                    if obj.bounding_poly and obj.bounding_poly.normalized_vertices:
+                        verts = obj.bounding_poly.normalized_vertices
+                        cx = sum(v.x for v in verts) / len(verts)
+                        cy = sum(v.y for v in verts) / len(verts)
+                        centroids.append((float(cx), float(cy)))
         
-        return people_count
+        return people_count, centroids
     
     @property
     def api_call_count(self) -> int:

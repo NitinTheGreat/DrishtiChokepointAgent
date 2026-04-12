@@ -205,9 +205,9 @@ class MotionConfig(BaseModel):
 class GeometryConfig(BaseModel):
     """Geometry configuration."""
     
-    definition_path: str = Field(
+    definition_path: Optional[str] = Field(
         default="./data/geometry/example_stadium_exit.json",
-        description="Path to geometry JSON file",
+        description="Path to geometry JSON file (null = disable region-specific density)",
     )
 
 

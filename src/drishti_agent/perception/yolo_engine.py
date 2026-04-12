@@ -216,7 +216,7 @@ class YOLOPerceptionEngine:
 
         # ── Run inference (in thread to avoid blocking event loop) ────
         try:
-            people_count, _ = await asyncio.to_thread(
+            people_count, centroids = await asyncio.to_thread(
                 self._run_inference, frame
             )
 
@@ -233,10 +233,19 @@ class YOLOPerceptionEngine:
                 area=self.roi_area,
                 density=density,
                 timestamp=frame.timestamp,
+                centroids=centroids if centroids else None,
             )
 
-            # Cache for skipped frames and error recovery
-            self._last_estimate = estimate
+            # Cache for skipped frames and error recovery.
+            # Cache WITHOUT centroids — centroids are transient,
+            # only valid for the frame that produced them.
+            self._last_estimate = DensityEstimate(
+                people_count=people_count,
+                area=self.roi_area,
+                density=density,
+                timestamp=frame.timestamp,
+                centroids=None,
+            )
 
             logger.debug(
                 f"YOLO: frame={frame.frame_id}, "

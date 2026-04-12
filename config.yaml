@@ -122,7 +122,10 @@ motion:
 # Geometry Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 geometry:
-  # Path to JSON file defining chokepoints, walkable areas, reference lines
+  # Path to JSON file defining chokepoints, walkable areas, reference lines.
+  # When set, enables region-specific density computation using centroids
+  # from the perception backend (YOLO or Vision).
+  # Set to null to disable region-specific density (global density only).
   definition_path: "./data/geometry/example_stadium_exit.json"
 
 # ─────────────────────────────────────────────────────────────────────────────

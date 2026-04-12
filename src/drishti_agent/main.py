@@ -56,6 +56,7 @@ from drishti_agent.observability import (
     AnalyticsComputer,
     VisualizationGenerator,
 )
+from drishti_agent.geometry.loader import GeometryLoader
 
 
 logger = logging.getLogger(__name__)
@@ -378,9 +379,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     
     # Phase 2: Perception (backend selection)
     _perception_engine = create_perception_engine()
+    
+    # Load geometry for region-specific density (optional)
+    _geometry = GeometryLoader.load(settings.geometry.definition_path)
+    if _geometry:
+        logger.info(
+            f"Geometry loaded: {len(_geometry.chokepoints)} chokepoints, "
+            f"scene={_geometry.scene_id}"
+        )
+    else:
+        logger.info("No geometry configured — using global density only")
+    
     _density_processor = DensitySignalProcessor(
         roi_area=settings.perception.roi_area,
         smoothing_alpha=settings.perception.density_smoothing_alpha,
+        geometry=_geometry,
     )
     
     # Phase 3: Flow processing
