@@ -21,10 +21,13 @@ Usage:
         --output-dir results/plots/
 
 Output files:
-    timeline.csv           — Per-frame metrics for time series plot
-    transitions.csv        — State transitions for timeline diagram
-    backend_comparison.csv — Backend latency/accuracy comparison
+    timeline.csv            — Per-frame metrics for time series plot
+    transitions.csv         — State transitions for timeline diagram
+    backend_comparison.csv  — Backend latency/accuracy comparison
     baseline_comparison.csv — Classifier stability comparison
+    ablation_summary.csv    — Hysteresis ablation comparison table
+    ablation_timeline.csv   — Per-frame states for all 4 ablation configs
+    adversarial_summary.csv — Adversarial scenario comparison table
 """
 
 import argparse
@@ -32,7 +35,7 @@ import csv
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +282,102 @@ def export_baseline_comparison(
     return None
 
 
+def export_ablation_data(
+    ablation_path: str, output_dir: Path,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Export ablation study data: summary table + per-frame timeline."""
+    with open(ablation_path, "r") as f:
+        data = json.load(f)
+
+    exported = []
+
+    # 1. Summary table
+    comparison = data.get("comparison_table", [])
+    if comparison:
+        output_file = output_dir / "ablation_summary.csv"
+        fieldnames = [
+            "config", "transitions", "false_recoveries", "oscillations",
+            "escalation_delay_sec", "recovery_delay_sec", "mean_duration_sec",
+        ]
+        with open(output_file, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(comparison)
+        print(f"  \u2705 Ablation summary:    {output_file} ({len(comparison)} configs)")
+        exported.append(str(output_file))
+
+    # 2. Per-frame timeline (all 4 configs side-by-side)
+    per_frame = data.get("per_frame_states", {})
+    fps = data.get("metadata", {}).get("fps", 10)
+    if per_frame:
+        # Find the shortest sequence length
+        lengths = [len(v) for v in per_frame.values()]
+        if lengths:
+            n = min(lengths)
+            output_file = output_dir / "ablation_timeline.csv"
+            fieldnames = ["frame_id", "elapsed_sec"] + [
+                f"state_{key}" for key in per_frame.keys()
+            ]
+            rows = []
+            for i in range(n):
+                row = {"frame_id": i, "elapsed_sec": round(i / fps, 3)}
+                for key, states in per_frame.items():
+                    row[f"state_{key}"] = states[i] if i < len(states) else 0
+                rows.append(row)
+
+            with open(output_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            print(f"  \u2705 Ablation timeline:   {output_file} ({n} frames)")
+            exported.append(str(output_file))
+
+    if not exported:
+        print(f"  \u26a0\ufe0f  No ablation data found.")
+    return exported[0] if len(exported) > 0 else None, exported[1] if len(exported) > 1 else None
+
+
+def export_adversarial_data(
+    adversarial_path: str, output_dir: Path,
+) -> Optional[str]:
+    """Export adversarial scenario comparison data."""
+    with open(adversarial_path, "r") as f:
+        data = json.load(f)
+
+    scenarios = data.get("scenarios", {})
+    if not scenarios:
+        print(f"  \u26a0\ufe0f  No adversarial scenario data found.")
+        return None
+
+    output_file = output_dir / "adversarial_summary.csv"
+    fieldnames = [
+        "scenario", "config", "transitions", "false_recoveries",
+        "oscillation_events", "first_escalation_sec",
+    ]
+    rows = []
+    for scen_key, scen in scenarios.items():
+        name = scen.get("name", scen_key)
+        for cfg_key, cfg_result in scen.get("configs", {}).items():
+            rows.append({
+                "scenario": name,
+                "config": cfg_key,
+                "transitions": cfg_result.get("transitions", 0),
+                "false_recoveries": cfg_result.get("false_recoveries", 0),
+                "oscillation_events": cfg_result.get("oscillation_events", 0),
+                "first_escalation_sec": cfg_result.get("first_escalation_sec", ""),
+            })
+
+    if rows:
+        with open(output_file, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"  \u2705 Adversarial summary: {output_file} ({len(rows)} rows)")
+        return str(output_file)
+
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,12 +409,21 @@ Examples:
         "--output-dir", default="results/plots",
         help="Output directory for CSV files (default: results/plots)",
     )
+    parser.add_argument(
+        "--ablation", default=None,
+        help="Path to ablation results JSON (from ablation_hysteresis.py)",
+    )
+    parser.add_argument(
+        "--adversarial", default=None,
+        help="Path to adversarial results JSON (from adversarial_scenarios.py)",
+    )
 
     args = parser.parse_args()
 
-    if not args.evaluation and not args.benchmark and not args.comparison:
+    if not args.evaluation and not args.benchmark and not args.comparison \
+            and not args.ablation and not args.adversarial:
         parser.error("At least one input file is required "
-                     "(--evaluation, --benchmark, or --comparison)")
+                     "(--evaluation, --benchmark, --comparison, --ablation, or --adversarial)")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -352,6 +460,24 @@ Examples:
             print(f"  ⚠️  Comparison file not found: {args.comparison}")
         else:
             r = export_baseline_comparison(args.comparison, output_dir)
+            if r:
+                exported.append(r)
+
+    if args.ablation:
+        if not Path(args.ablation).exists():
+            print(f"  ⚠️  Ablation file not found: {args.ablation}")
+        else:
+            r1, r2 = export_ablation_data(args.ablation, output_dir)
+            if r1:
+                exported.append(r1)
+            if r2:
+                exported.append(r2)
+
+    if args.adversarial:
+        if not Path(args.adversarial).exists():
+            print(f"  ⚠️  Adversarial file not found: {args.adversarial}")
+        else:
+            r = export_adversarial_data(args.adversarial, output_dir)
             if r:
                 exported.append(r)
 
