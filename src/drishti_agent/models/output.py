@@ -69,6 +69,8 @@ class DensityGradient(BaseModel):
         upstream: Density in the region before the chokepoint
         chokepoint: Density in the narrow region itself
         downstream: Density in the region after the chokepoint
+        source: Whether values are "measured" (from geometry+centroids)
+            or "estimated" (proportional fallback from global density)
     """
     
     upstream: float = Field(
@@ -87,6 +89,77 @@ class DensityGradient(BaseModel):
         ...,
         ge=0.0,
         description="Density after the chokepoint (people/m²)",
+    )
+    
+    source: str = Field(
+        default="estimated",
+        description=(
+            "Data source: 'measured' when computed from geometry + centroids, "
+            "'estimated' when using proportional fallback from global density"
+        ),
+    )
+
+
+class FlowDebugInfo(BaseModel):
+    """
+    Debug information for the flow pressure computation.
+    
+    Exposes the raw values used to compute flow_pressure for
+    reproducibility and paper reviewability. All values are from
+    the LAST processed frame.
+    
+    NOT control-critical — for observability only.
+    
+    Attributes:
+        inflow_proxy: Raw proxy value (NOT calibrated to persons/s)
+        capacity: Chokepoint capacity = k × width (persons/s)
+        inflow_scale: Calibration parameter used
+        activity_detected: Whether scene exceeded min_active_flow_threshold
+        raw_coherence: Pre-smoothing coherence
+        raw_pressure: Pre-smoothing pressure (inflow_proxy / capacity)
+        mean_magnitude: Mean optical flow magnitude (pixels/frame)
+    """
+    
+    inflow_proxy: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Raw proxy value (not calibrated to persons/s)",
+    )
+    
+    capacity: float = Field(
+        default=0.0,
+        gt=0.0,
+        description="Chokepoint capacity = k × width (persons/s)",
+    )
+    
+    inflow_scale: float = Field(
+        default=1.0,
+        gt=0.0,
+        description="Calibration parameter used for inflow proxy",
+    )
+    
+    activity_detected: bool = Field(
+        default=False,
+        description="Whether scene exceeded min_active_flow_threshold",
+    )
+    
+    raw_coherence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Pre-smoothing directional coherence",
+    )
+    
+    raw_pressure: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Pre-smoothing pressure (inflow_proxy / capacity)",
+    )
+    
+    mean_magnitude: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Mean optical flow magnitude (pixels/frame)",
     )
 
 
@@ -129,17 +202,18 @@ class Analytics(BaseModel):
     but MUST NOT influence decision-making directly.
     
     Attributes:
-        inflow_rate: People crossing reference line per second
+        inflow_rate: Inflow proxy value (not calibrated persons/s)
         capacity: Sustainable flow capacity of the chokepoint
         mean_flow_magnitude: Average optical flow magnitude
         direction_entropy: Measure of flow direction disorder
         density_gradient: Density across the three regions
+        flow_debug: Raw flow computation debug info for reproducibility
     """
     
     inflow_rate: float = Field(
         ...,
         ge=0.0,
-        description="People per second crossing the reference line",
+        description="Inflow proxy value (see flow_debug for computation details)",
     )
     
     capacity: float = Field(
@@ -163,6 +237,11 @@ class Analytics(BaseModel):
     density_gradient: Optional[DensityGradient] = Field(
         default=None,
         description="Density breakdown by region",
+    )
+    
+    flow_debug: Optional[FlowDebugInfo] = Field(
+        default=None,
+        description="Raw flow computation debug info for reproducibility",
     )
 
 

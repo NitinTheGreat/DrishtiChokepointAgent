@@ -99,24 +99,64 @@ perception:
 # ─────────────────────────────────────────────────────────────────────────────
 # Motion Configuration (Phase 3)
 # ─────────────────────────────────────────────────────────────────────────────
+# Optical flow and flow pressure computation parameters.
+# Flow pressure is the primary inflow signal used by the transition policy.
+
 motion:
   # Optical flow method: 'farneback' or 'tvl1'
+  # Farneback is faster; TVL1 handles large displacements better
   optical_flow_method: "farneback"
   
-  # Minimum flow magnitude for coherence computation (pixels/frame)
-  magnitude_threshold: 0.5
+  # ── Chokepoint Physical Parameters ──────────────────────────────────────
   
-  # EMA smoothing factor for coherence (0, 1]
-  coherence_smoothing_alpha: 0.3
-  
-  # Minimum mean magnitude for active scene detection
-  min_active_flow_threshold: 0.3
-  
-  # Chokepoint width in meters
+  # Physical width of the chokepoint in meters.
+  # Measure the narrowest point of the passage/exit/corridor.
+  # Used in capacity formula: C = k × W (Fruin 1971)
   chokepoint_width: 3.0
   
-  # Capacity factor k (persons/meter/second)
+  # Capacity coefficient k (persons/meter/second).
+  # Standard value from pedestrian flow theory for unidirectional flow
+  # (Fruin 1971, Weidmann 1993). Multiply by chokepoint_width to get
+  # sustainable flow capacity in persons/second.
+  # Example: k=1.3 × W=3.0m → capacity = 3.9 persons/sec
   capacity_factor: 1.3
+  
+  # ── Inflow Proxy Configuration ──────────────────────────────────────────
+  
+  # Calibration scale for the inflow proxy.
+  # Maps optical flow magnitude to approximate flow rate relative to capacity.
+  # Default 1.0 produces normalized pressure values suitable for
+  # threshold-based classification without venue-specific calibration.
+  #
+  # Calibration procedure:
+  #   1. Record a scene with known flow rate (e.g., count persons/sec manually)
+  #   2. Note the mean optical flow magnitude at that flow rate
+  #   3. Set inflow_scale = measured_flow_rate / observed_magnitude
+  #
+  # NOTE: The inflow proxy uses magnitude alone as a velocity proxy.
+  # Density is tracked independently in the state vector. The agent evaluates
+  # BOTH density AND pressure jointly — multiplying density into pressure
+  # would create correlated features, reducing signal independence.
+  inflow_scale: 1.0
+  
+  # ── Optical Flow Parameters ─────────────────────────────────────────────
+  
+  # Minimum per-pixel flow magnitude (pixels/frame) to include in
+  # coherence computation. Filters sub-pixel noise from optical flow.
+  # Higher values ignore more noise but may miss slow movement.
+  magnitude_threshold: 0.5
+  
+  # Minimum mean magnitude for the scene to be considered "active."
+  # Below this threshold, flow signals are NOT updated, preventing
+  # false positives from camera jitter or static scenes.
+  # Set higher in windy outdoor environments; lower for indoor.
+  min_active_flow_threshold: 0.3
+  
+  # EMA smoothing factor for flow coherence and pressure.
+  # Higher (→1.0) = more responsive but noisier signal.
+  # Lower (→0.0) = smoother but slower to react to real changes.
+  # Default 0.3 balances responsiveness with temporal stability.
+  coherence_smoothing_alpha: 0.3
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Geometry Configuration

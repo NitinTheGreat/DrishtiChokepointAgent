@@ -200,6 +200,15 @@ class MotionConfig(BaseModel):
         gt=0,
         description="Capacity factor k (persons/meter/second)",
     )
+    inflow_scale: float = Field(
+        default=1.0,
+        gt=0,
+        description=(
+            "Calibration scale for inflow proxy. Maps optical flow magnitude "
+            "to approximate flow rate. Default 1.0 produces normalized values. "
+            "Calibrate per-venue: scale = measured_rate / observed_magnitude."
+        ),
+    )
 
 
 class GeometryConfig(BaseModel):

@@ -8,8 +8,31 @@ This processor:
     - Maintains previous frame for flow computation
     - Computes optical flow via FarnebackFlowEstimator
     - Computes directional coherence with EMA smoothing
-    - Computes time-normalized inflow via reference line crossing
-    - Computes flow_pressure = inflow_rate / capacity
+    - Computes a normalized inflow PROXY from mean flow magnitude
+    - Computes flow_pressure = inflow_proxy / capacity
+
+Inflow Proxy Design:
+    The inflow computation uses mean optical flow magnitude as a PROXY
+    for pedestrian inflow rate, not a direct measurement of persons/second
+    crossing a reference line. This is deliberate:
+
+    1. Direct reference-line crossing requires per-person tracking, which
+       violates the system's privacy-by-architecture constraint.
+    2. Mean optical flow magnitude is proportional to average pedestrian
+       velocity in the scene (Mehran et al., CVPR 2009).
+    3. Density is tracked independently in the state vector. The agent's
+       transition logic evaluates BOTH density AND pressure jointly,
+       so multiplying density into pressure would create correlated
+       features, reducing signal independence.
+    4. The inflow_scale parameter enables per-venue calibration without
+       code changes.
+
+    Physics grounding:
+        - At a chokepoint, flow rate q ≈ ρ × v (Weidmann, 1993)
+        - Since ρ (density) is tracked separately, v (velocity proxy from
+          optical flow magnitude) alone suffices for pressure computation
+        - Capacity C = k × W (Fruin, 1971), where k ≈ 1.3 persons/m/s
+          and W is chokepoint width in meters
 
 Key Design Decisions:
     - Activity detection prevents false positives during static scenes
@@ -52,6 +75,7 @@ class FlowSignalProcessor:
     Attributes:
         chokepoint_width: Width of chokepoint in meters
         capacity_factor: k in capacity formula (persons/meter/second)
+        inflow_scale: Calibration scale for inflow proxy (venue-specific)
         magnitude_threshold: Minimum flow magnitude to consider
         coherence_smoothing_alpha: EMA smoothing for coherence
         min_active_flow_threshold: Minimum mean magnitude for active scene
@@ -61,6 +85,7 @@ class FlowSignalProcessor:
         self,
         chokepoint_width: float = 3.0,
         capacity_factor: float = 1.3,
+        inflow_scale: float = 1.0,
         magnitude_threshold: float = 0.5,
         coherence_smoothing_alpha: float = 0.3,
         min_active_flow_threshold: float = 0.3,
@@ -70,9 +95,17 @@ class FlowSignalProcessor:
         Initialize flow signal processor.
         
         Args:
-            chokepoint_width: Physical width in meters
-            capacity_factor: k value (persons/meter/second)
-            magnitude_threshold: Min magnitude for coherence
+            chokepoint_width: Physical width in meters (W in C = k × W)
+            capacity_factor: k value (persons/meter/second), from pedestrian
+                flow theory (Fruin 1971, Weidmann 1993). Default 1.3 is the
+                standard value for unidirectional pedestrian flow.
+            inflow_scale: Calibration scale for the inflow proxy. Maps
+                optical flow magnitude to approximate flow rate relative
+                to capacity. Default 1.0 produces normalized pressure values
+                suitable for threshold-based classification. Calibrate
+                per-venue: measure actual flow rate (persons/sec) at a known
+                magnitude level, then set scale = measured_rate / magnitude.
+            magnitude_threshold: Min magnitude for coherence (pixels/frame)
             coherence_smoothing_alpha: EMA alpha for coherence
             min_active_flow_threshold: Min mean magnitude for active detection
             log_every_n_frames: Logging interval
@@ -84,6 +117,7 @@ class FlowSignalProcessor:
         self._validate_parameters(
             chokepoint_width,
             capacity_factor,
+            inflow_scale,
             magnitude_threshold,
             coherence_smoothing_alpha,
             min_active_flow_threshold,
@@ -91,12 +125,13 @@ class FlowSignalProcessor:
         
         self.chokepoint_width = chokepoint_width
         self.capacity_factor = capacity_factor
+        self.inflow_scale = inflow_scale
         self.magnitude_threshold = magnitude_threshold
         self.coherence_smoothing_alpha = coherence_smoothing_alpha
         self.min_active_flow_threshold = min_active_flow_threshold
         self.log_every_n_frames = log_every_n_frames
         
-        # Computed capacity: C = k × width
+        # Computed capacity: C = k × width (Fruin 1971)
         self.capacity = capacity_factor * chokepoint_width
         
         # Flow estimator
@@ -118,13 +153,14 @@ class FlowSignalProcessor:
         logger.info(
             f"FlowSignalProcessor initialized: "
             f"width={chokepoint_width}m, capacity={self.capacity:.2f}/s, "
-            f"alpha={coherence_smoothing_alpha}"
+            f"inflow_scale={inflow_scale}, alpha={coherence_smoothing_alpha}"
         )
     
     @staticmethod
     def _validate_parameters(
         width: float,
         capacity_factor: float,
+        inflow_scale: float,
         mag_threshold: float,
         alpha: float,
         min_active: float,
@@ -136,6 +172,8 @@ class FlowSignalProcessor:
             errors.append(f"chokepoint_width must be > 0, got {width}")
         if capacity_factor <= 0:
             errors.append(f"capacity_factor must be > 0, got {capacity_factor}")
+        if inflow_scale <= 0:
+            errors.append(f"inflow_scale must be > 0, got {inflow_scale}")
         if mag_threshold < 0:
             errors.append(f"magnitude_threshold must be >= 0, got {mag_threshold}")
         if not 0 < alpha <= 1:
@@ -205,15 +243,35 @@ class FlowSignalProcessor:
         else:
             self._inactive_frame_counter = 0
         
-        # Compute raw inflow (time-normalized)
-        # For Phase 3, use simple mean magnitude as proxy for inflow
-        # Real crossing counting requires reference line geometry
-        # inflow_rate = (estimated crossings) / delta_time
-        # Simplified: proportional to mean magnitude
-        raw_inflow = mean_magnitude / delta_time if is_active else 0.0
+        # ── Compute inflow proxy ──────────────────────────────────────
+        # This is a PROXY for pedestrian inflow rate, not a direct
+        # measurement of persons/second. See module docstring for
+        # full physics justification.
+        #
+        # Formula:
+        #   inflow_proxy = mean_magnitude × inflow_scale / delta_time
+        #
+        # Where:
+        #   - mean_magnitude is proportional to average pedestrian
+        #     velocity (Mehran et al., CVPR 2009)
+        #   - inflow_scale is a venue-specific calibration constant
+        #     (default 1.0 for normalized values)
+        #   - delta_time provides FPS-independence
+        #
+        # NOTE: Density is NOT multiplied in here. Flow pressure uses
+        # magnitude alone as a velocity proxy. Density is tracked
+        # independently in the state vector, and the agent evaluates
+        # BOTH density AND pressure jointly in the transition logic.
+        # Multiplying density into pressure would create correlated
+        # features, reducing the independence of the four signals
+        # (density, density_slope, flow_pressure, flow_coherence).
+        inflow_proxy = (
+            mean_magnitude * self.inflow_scale / delta_time
+            if is_active else 0.0
+        )
         
-        # Compute raw pressure
-        raw_pressure = raw_inflow / self.capacity if self.capacity > 0 else 0.0
+        # Compute raw pressure: pressure = inflow_proxy / capacity
+        raw_pressure = inflow_proxy / self.capacity if self.capacity > 0 else 0.0
         
         # Apply EMA smoothing
         if is_active:
@@ -234,10 +292,13 @@ class FlowSignalProcessor:
         # Store debug state
         self._last_debug_state = FlowDebugState(
             raw_coherence=raw_coherence,
-            raw_inflow=raw_inflow,
+            inflow_proxy=inflow_proxy,
+            raw_pressure=raw_pressure,
             mean_flow_magnitude=mean_magnitude,
             active_pixel_count=active_count,
             is_active=is_active,
+            capacity=self.capacity,
+            inflow_scale=self.inflow_scale,
         )
         
         # Create output state
@@ -296,4 +357,5 @@ class FlowSignalProcessor:
             "smoothed_coherence": self._smoothed_coherence,
             "smoothed_pressure": self._smoothed_pressure,
             "capacity": self.capacity,
+            "inflow_scale": self.inflow_scale,
         }

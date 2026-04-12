@@ -49,6 +49,7 @@ from drishti_agent.models.output import (
     Decision,
     Analytics,
     DensityGradient,
+    FlowDebugInfo,
     Visualization,
     AgentOutput,
 )
@@ -349,6 +350,20 @@ async def process_frames() -> None:
             
             # Build full output payload
             if decision and state_vector:
+                # Build flow debug info from processor debug state
+                flow_debug_info = None
+                if _flow_processor and _flow_processor.debug_state:
+                    fds = _flow_processor.debug_state
+                    flow_debug_info = FlowDebugInfo(
+                        inflow_proxy=fds.inflow_proxy,
+                        capacity=fds.capacity,
+                        inflow_scale=fds.inflow_scale,
+                        activity_detected=fds.is_active,
+                        raw_coherence=fds.raw_coherence,
+                        raw_pressure=fds.raw_pressure,
+                        mean_magnitude=fds.mean_flow_magnitude,
+                    )
+                
                 analytics = Analytics(
                     inflow_rate=analytics_snapshot.inflow_rate,
                     capacity=analytics_snapshot.capacity,
@@ -358,7 +373,9 @@ async def process_frames() -> None:
                         upstream=analytics_snapshot.density_gradient.upstream,
                         chokepoint=analytics_snapshot.density_gradient.chokepoint,
                         downstream=analytics_snapshot.density_gradient.downstream,
+                        source=analytics_snapshot.density_gradient.source,
                     ),
+                    flow_debug=flow_debug_info,
                 )
                 
                 viz: Optional[Visualization] = None
@@ -465,6 +482,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _flow_processor = FlowSignalProcessor(
         chokepoint_width=settings.motion.chokepoint_width,
         capacity_factor=settings.motion.capacity_factor,
+        inflow_scale=settings.motion.inflow_scale,
         magnitude_threshold=settings.motion.magnitude_threshold,
         coherence_smoothing_alpha=settings.motion.coherence_smoothing_alpha,
         min_active_flow_threshold=settings.motion.min_active_flow_threshold,

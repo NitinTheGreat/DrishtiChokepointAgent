@@ -35,13 +35,18 @@ class DensityGradientAnalytics:
     Density gradient across chokepoint regions.
     
     When geometry and centroids are available, these values are
-    computed from real per-region centroid counts. Otherwise,
-    falls back to proportional estimates from global density.
+    computed from real per-region centroid counts (source="measured").
+    Otherwise, falls back to proportional estimates from global
+    density (source="estimated").
+    
+    The source field enables downstream consumers and paper reviewers
+    to distinguish real per-region measurements from estimates.
     """
     
     upstream: float
     chokepoint: float
     downstream: float
+    source: str = "estimated"  # "measured" or "estimated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +108,7 @@ class AnalyticsComputer:
         """
         # Extract from flow debug state
         if flow_debug:
-            inflow_rate = flow_debug.raw_inflow
+            inflow_rate = flow_debug.inflow_proxy
             mean_magnitude = flow_debug.mean_flow_magnitude
         else:
             inflow_rate = 0.0
@@ -137,9 +142,11 @@ class AnalyticsComputer:
                 downstream=round(
                     max(0, density_state.region_densities.get("downstream", 0.0)), 4
                 ),
+                source="measured",
             )
         else:
             # Fallback: proportional estimate from global density
+            # source="estimated" is the default in DensityGradientAnalytics
             density_gradient = self._compute_estimated_gradient(density)
         
         return AnalyticsSnapshot(

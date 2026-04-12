@@ -56,22 +56,31 @@ class FlowDebugState:
     
     Attributes:
         raw_coherence: Unsmoothed directional coherence
-        raw_inflow: Raw crossing count (time-normalized)
-        mean_flow_magnitude: Average optical flow magnitude
+        inflow_proxy: Inflow proxy value (NOT calibrated to persons/s).
+            Derived from mean optical flow magnitude × inflow_scale / dt.
+            See flow_processor.py module docstring for physics justification.
+        raw_pressure: Pre-smoothing pressure (inflow_proxy / capacity)
+        mean_flow_magnitude: Average optical flow magnitude (pixels/frame)
         active_pixel_count: Number of pixels with flow > threshold
-        is_active: Whether scene has enough motion
+        is_active: Whether scene has enough motion for flow processing
+        capacity: Chokepoint capacity = k × width (persons/s)
+        inflow_scale: Calibration scale used for inflow proxy
     """
     
     raw_coherence: float
-    raw_inflow: float
+    inflow_proxy: float
+    raw_pressure: float
     mean_flow_magnitude: float
     active_pixel_count: int
     is_active: bool
+    capacity: float = 0.0
+    inflow_scale: float = 1.0
     
     def __repr__(self) -> str:
         return (
             f"FlowDebugState(raw_coh={self.raw_coherence:.4f}, "
-            f"raw_inflow={self.raw_inflow:.4f}, "
+            f"inflow_proxy={self.inflow_proxy:.4f}, "
+            f"raw_pressure={self.raw_pressure:.4f}, "
             f"mag={self.mean_flow_magnitude:.4f}, "
             f"active={self.is_active})"
         )
