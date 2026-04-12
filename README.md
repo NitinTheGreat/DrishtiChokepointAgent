@@ -11,7 +11,7 @@
 ## Overview
 
 DrishtiChokepointAgent is the **core reasoning system** in the Drishti crowd safety platform. It subscribes to DrishtiStream, processes frames sequentially, computes crowd dynamics under explicit spatial constraints, and emits physics-grounded risk decisions.
-
+m
 This repository is designed to be:
 - **Production-quality**: Container-ready, Cloud Run compatible, typed
 - **Research-defensible**: Physics-grounded, deterministic, inspectable

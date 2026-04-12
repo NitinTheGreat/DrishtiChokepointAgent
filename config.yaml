@@ -37,7 +37,7 @@ stream:
 # ─────────────────────────────────────────────────────────────────────────────
 perception:
   # Backend for occupancy/density estimation
-  # Options: "mock" (testing), "vision" (Google Cloud Vision API)
+  # Options: "mock" (testing), "vision" (Google Cloud Vision API), "yolo" (on-device YOLOv8n)
   backend: "vision"
   
   # Region of interest area in square meters (for density calculation)
@@ -69,6 +69,32 @@ perception:
     
     # Path to service account JSON (null = use ADC / default credentials)
     credentials_path: "drishti-vision-sa..json"
+  
+  # YOLO backend configuration (on-device YOLOv8n person detection)
+  # Privacy-preserving: all inference runs locally, frames never leave the device
+  yolo:
+    # Path to YOLOv8 model weights (auto-downloaded if not present)
+    model_path: "yolov8n.pt"
+    
+    # Minimum detection confidence threshold (0.01-1.0)
+    # Lower = more detections (more false positives)
+    # Higher = fewer detections (more false negatives)
+    confidence: 0.25
+    
+    # Non-maximum suppression IoU threshold (0.01-1.0)
+    # Controls overlap tolerance between detections
+    iou: 0.45
+    
+    # Input image resolution for YOLO inference
+    # Options: 320 (fastest), 416, 480, 640 (default, best accuracy), 1280 (slowest)
+    imgsz: 640
+    
+    # Inference device: "auto" (CUDA if available, else CPU), "cpu", or "cuda"
+    device: "auto"
+    
+    # Process every Nth frame (1 = all frames)
+    # YOLO is fast enough for every frame on most hardware
+    sample_rate: 1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Motion Configuration (Phase 3)

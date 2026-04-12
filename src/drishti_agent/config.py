@@ -110,12 +110,46 @@ class VisionPerceptionConfig(BaseModel):
     )
 
 
+class YOLOPerceptionConfig(BaseModel):
+    """YOLOv8n on-device perception backend configuration."""
+    
+    model_path: str = Field(
+        default="yolov8n.pt",
+        description="Path to YOLOv8 weights file (auto-downloaded if absent)",
+    )
+    confidence: float = Field(
+        default=0.25,
+        ge=0.01,
+        le=1.0,
+        description="Detection confidence threshold",
+    )
+    iou: float = Field(
+        default=0.45,
+        ge=0.01,
+        le=1.0,
+        description="Non-maximum suppression IoU threshold",
+    )
+    imgsz: int = Field(
+        default=640,
+        description="Input image resolution for YOLO inference",
+    )
+    device: str = Field(
+        default="auto",
+        description="Inference device: 'auto', 'cpu', or 'cuda'",
+    )
+    sample_rate: int = Field(
+        default=1,
+        ge=1,
+        description="Process every Nth frame (1 = all frames)",
+    )
+
+
 class PerceptionConfig(BaseModel):
     """Perception backend configuration."""
     
-    backend: Literal["mock", "vision"] = Field(
+    backend: Literal["mock", "vision", "yolo"] = Field(
         default="mock",
-        description="Perception backend: 'mock' or 'vision'",
+        description="Perception backend: 'mock', 'vision', or 'yolo'",
     )
     roi_area: float = Field(
         default=42.0,
@@ -130,6 +164,7 @@ class PerceptionConfig(BaseModel):
     )
     mock: MockPerceptionConfig = Field(default_factory=MockPerceptionConfig)
     vision: VisionPerceptionConfig = Field(default_factory=VisionPerceptionConfig)
+    yolo: YOLOPerceptionConfig = Field(default_factory=YOLOPerceptionConfig)
 
 
 class MotionConfig(BaseModel):

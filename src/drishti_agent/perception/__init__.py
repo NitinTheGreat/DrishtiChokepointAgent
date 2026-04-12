@@ -11,6 +11,7 @@ Components:
     - PerceptionEngine: Protocol for density estimation
     - MockPerceptionEngine: Deterministic mock for testing
     - VisionPerceptionEngine: Google Cloud Vision API (production)
+    - YOLOPerceptionEngine: On-device YOLOv8n detection (privacy-preserving)
 
 Design Philosophy:
     Perception is treated as a pluggable black box. The agent
@@ -34,6 +35,14 @@ except ImportError:
     VisionPerceptionEngine = None  # type: ignore
     VisionAPIError = None  # type: ignore
 
+# YOLO engine imported separately to avoid mandatory ultralytics dependency
+try:
+    from drishti_agent.perception.yolo_engine import YOLOPerceptionEngine
+    _YOLO_AVAILABLE = True
+except ImportError:
+    _YOLO_AVAILABLE = False
+    YOLOPerceptionEngine = None  # type: ignore
+
 # Legacy: Original occupancy interface (kept for compatibility)
 from drishti_agent.perception.occupancy import (
     OccupancyEstimator,
@@ -46,8 +55,11 @@ __all__ = [
     "MockPerceptionEngine",
     "VisionPerceptionEngine",
     "VisionAPIError",
+    "YOLOPerceptionEngine",
     "OccupancyEstimator",
     "OccupancyResult",
     "MockOccupancyEstimator",
     "_VISION_AVAILABLE",
+    "_YOLO_AVAILABLE",
 ]
+

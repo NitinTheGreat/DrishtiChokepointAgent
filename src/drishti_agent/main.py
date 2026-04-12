@@ -37,6 +37,7 @@ from drishti_agent.perception import (
     MockPerceptionEngine,
     VisionPerceptionEngine,
     _VISION_AVAILABLE,
+    _YOLO_AVAILABLE,
 )
 from drishti_agent.signals import DensitySignalProcessor, FlowSignalProcessor
 from drishti_agent.models.density import DensityState
@@ -147,11 +148,11 @@ def _handle_sigterm(signum, frame):
 # Perception Engine Factory
 # =============================================================================
 
-def create_perception_engine() -> Union[MockPerceptionEngine, VisionPerceptionEngine]:
+def create_perception_engine():
     """
     Create perception engine based on config.
     
-    Fails fast if vision backend is requested but unavailable.
+    Fails fast if requested backend is unavailable.
     """
     backend = settings.perception.backend
     
@@ -180,6 +181,33 @@ def create_perception_engine() -> Union[MockPerceptionEngine, VisionPerceptionEn
             max_rps=settings.perception.vision.max_rps,
             credentials_path=settings.perception.vision.credentials_path,
             person_confidence_threshold=settings.perception.vision.confidence_threshold,
+        )
+    
+    elif backend == "yolo":
+        if not _YOLO_AVAILABLE:
+            raise RuntimeError(
+                "YOLO backend requested but ultralytics not installed. "
+                "Install with: pip install ultralytics>=8.1.0"
+            )
+        
+        # Lazy import — only load ultralytics when YOLO backend is selected
+        from drishti_agent.perception.yolo_engine import YOLOPerceptionEngine
+        
+        yolo_cfg = settings.perception.yolo
+        logger.info(
+            f"Using YOLOPerceptionEngine: "
+            f"model={yolo_cfg.model_path}, device={yolo_cfg.device}, "
+            f"conf={yolo_cfg.confidence}, imgsz={yolo_cfg.imgsz}, "
+            f"sample_rate={yolo_cfg.sample_rate}"
+        )
+        return YOLOPerceptionEngine(
+            model_path=yolo_cfg.model_path,
+            confidence=yolo_cfg.confidence,
+            iou_threshold=yolo_cfg.iou,
+            imgsz=yolo_cfg.imgsz,
+            device=yolo_cfg.device,
+            sample_rate=yolo_cfg.sample_rate,
+            roi_area=settings.perception.roi_area,
         )
     
     else:
