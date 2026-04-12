@@ -43,16 +43,16 @@ class TestPlaceholder:
 
 
 class TestTransitions:
-    """Tests for state transition logic."""
+    """Basic smoke tests for state transition logic (comprehensive tests in test_transitions.py)."""
     
     def test_transition_thresholds_defaults(self):
         """Verify default thresholds are set."""
         from drishti_agent.agent.transitions import TransitionThresholds
         
         thresholds = TransitionThresholds()
-        assert thresholds.density_buildup == 0.4
+        assert thresholds.density_buildup == 0.5
         assert thresholds.density_critical == 0.7
-        assert thresholds.hysteresis_frames == 30
+        assert thresholds.min_state_dwell_sec == 5.0
     
     def test_transition_policy_normal(self):
         """Verify NORMAL state is returned for low values."""
@@ -60,25 +60,25 @@ class TestTransitions:
         from drishti_agent.models.state import AgentState, RiskState, StateVector
         
         policy = TransitionPolicy(TransitionThresholds())
-        agent_state = AgentState()
+        agent_state = AgentState(state_entered_at=0.0)
         state_vector = StateVector(
             density=0.2,
             density_slope=0.01,
             flow_pressure=0.3,
-            flow_coherence=0.9,
+            flow_coherence=0.5,
         )
         
-        new_state, reason = policy.evaluate(agent_state, state_vector)
-        assert new_state == RiskState.NORMAL
-        assert reason == "BELOW_ALL_THRESHOLDS"
+        new_state, result = policy.evaluate(agent_state, state_vector, current_time=100.0)
+        assert new_state.risk_state == RiskState.NORMAL
+        assert result.reason_code.value == "STABLE"
     
-    def test_transition_policy_critical(self):
-        """Verify CRITICAL state is returned for high density."""
+    def test_transition_policy_buildup(self):
+        """Verify BUILDUP targets for high density (transition needs sustain window)."""
         from drishti_agent.agent.transitions import TransitionPolicy, TransitionThresholds
         from drishti_agent.models.state import AgentState, RiskState, StateVector
         
         policy = TransitionPolicy(TransitionThresholds())
-        agent_state = AgentState()
+        agent_state = AgentState(state_entered_at=0.0)
         state_vector = StateVector(
             density=0.8,  # Above critical threshold
             density_slope=0.05,
@@ -86,6 +86,8 @@ class TestTransitions:
             flow_coherence=0.7,
         )
         
-        new_state, reason = policy.evaluate(agent_state, state_vector)
-        assert new_state == RiskState.CRITICAL
-        assert "DENSITY" in reason or "CRITICAL" in reason
+        # Single evaluation starts tracking, doesn't immediately transition
+        new_state, result = policy.evaluate(agent_state, state_vector, current_time=100.0)
+        assert new_state.risk_state == RiskState.NORMAL  # Still in dwell/sustain hold
+        assert result.reason_code.value == "HYSTERESIS_HOLD"
+
