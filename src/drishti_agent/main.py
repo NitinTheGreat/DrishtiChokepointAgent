@@ -25,7 +25,9 @@ import os
 import signal
 import sys
 import time
+from collections import deque
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import AsyncIterator, Optional, Union
 
 from fastapi import FastAPI, WebSocket
@@ -103,6 +105,40 @@ _is_ready: bool = False
 # Error counters
 _frame_error_count: int = 0
 _perception_error_count: int = 0
+
+
+# =============================================================================
+# Per-Stage Latency Tracking
+# =============================================================================
+
+@dataclass(frozen=True, slots=True)
+class FrameLatency:
+    """Per-frame timing breakdown across pipeline stages."""
+    frame_id: int
+    total_ms: float
+    perception_ms: float
+    density_ms: float
+    flow_ms: float
+    agent_ms: float
+    output_ms: float
+
+
+# Rolling window of latency records (last 100 frames)
+_LATENCY_WINDOW_SIZE: int = 100
+_latency_window: deque = deque(maxlen=_LATENCY_WINDOW_SIZE)
+
+
+def _compute_latency_stats(values: list) -> dict:
+    """Compute mean, p95, and max from a list of float values."""
+    if not values:
+        return {"mean_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0}
+    import numpy as np
+    arr = np.array(values)
+    return {
+        "mean_ms": round(float(np.mean(arr)), 2),
+        "p95_ms": round(float(np.percentile(arr, 95)), 2),
+        "max_ms": round(float(np.max(arr)), 2),
+    }
 
 
 # =============================================================================
@@ -250,8 +286,10 @@ async def process_frames() -> None:
             
             _last_frame_id = frame.frame_id
             current_time = time.time()
+            t_frame_start = time.perf_counter()
             
-            # Phase 2: Density estimation
+            # Phase 2: Density estimation (timed)
+            t0 = time.perf_counter()
             try:
                 estimate = await _perception_engine.estimate_density(frame)
                 density_state = _density_processor.update(estimate)
@@ -260,8 +298,16 @@ async def process_frames() -> None:
                 _perception_error_count += 1
                 logger.error(f"Perception error (frame={frame.frame_id}): {e}")
                 continue  # Skip this frame
+            t_perception = (time.perf_counter() - t0) * 1000
             
-            # Phase 3: Flow computation
+            # Density processing time (already included in perception timing,
+            # separate for fine-grained profiling)
+            t0 = time.perf_counter()
+            # density_processor.update already called above, measure overhead
+            t_density = 0.0  # Included in perception timing above
+            
+            # Phase 3: Flow computation (timed)
+            t0 = time.perf_counter()
             try:
                 flow_state = _flow_processor.update(frame)
                 if flow_state is not None:
@@ -270,8 +316,10 @@ async def process_frames() -> None:
                 _frame_error_count += 1
                 logger.error(f"Flow error (frame={frame.frame_id}): {e}")
                 continue  # Skip this frame
+            t_flow = (time.perf_counter() - t0) * 1000
             
-            # Phase 4: Agent decision
+            # Phase 4: Agent decision (timed)
+            t0 = time.perf_counter()
             decision: Optional[Decision] = None
             state_vector: Optional[StateVector] = None
             
@@ -285,8 +333,10 @@ async def process_frames() -> None:
                 
                 decision = _agent.process(state_vector)
                 _current_decision = decision
+            t_agent = (time.perf_counter() - t0) * 1000
             
-            # Phase 5: Analytics + Visualization
+            # Phase 5: Analytics + Visualization (timed)
+            t0 = time.perf_counter()
             flow_debug = _flow_processor.debug_state
             analytics_snapshot = _analytics_computer.compute(
                 flow_debug=flow_debug,
@@ -327,6 +377,20 @@ async def process_frames() -> None:
                     analytics=analytics,
                     viz=viz,
                 )
+            t_output = (time.perf_counter() - t0) * 1000
+            
+            t_total = (time.perf_counter() - t_frame_start) * 1000
+            
+            # Record latency breakdown
+            _latency_window.append(FrameLatency(
+                frame_id=frame.frame_id,
+                total_ms=round(t_total, 2),
+                perception_ms=round(t_perception, 2),
+                density_ms=round(t_density, 2),
+                flow_ms=round(t_flow, 2),
+                agent_ms=round(t_agent, 2),
+                output_ms=round(t_output, 2),
+            ))
             
         except asyncio.CancelledError:
             logger.info("Frame processing pipeline cancelled")
@@ -548,7 +612,7 @@ async def ready() -> JSONResponse:
 
 @app.get("/metrics")
 async def metrics() -> JSONResponse:
-    """Detailed metrics for observability."""
+    """Detailed metrics for observability, including per-stage latency."""
     consumer = get_frame_consumer()
     buffer = get_frame_buffer()
     
@@ -590,6 +654,55 @@ async def metrics() -> JSONResponse:
     if agent:
         agent_metrics["total_frames"] = agent.agent_state.total_frames_processed
     
+    # Per-stage latency statistics (from rolling window)
+    latency_stats = {}
+    if _latency_window:
+        records = list(_latency_window)
+        latency_stats = {
+            "total": _compute_latency_stats([r.total_ms for r in records]),
+            "perception": _compute_latency_stats([r.perception_ms for r in records]),
+            "density": _compute_latency_stats([r.density_ms for r in records]),
+            "flow": _compute_latency_stats([r.flow_ms for r in records]),
+            "agent": _compute_latency_stats([r.agent_ms for r in records]),
+            "output": _compute_latency_stats([r.output_ms for r in records]),
+        }
+    
+    # Perception backend info
+    perception_info = {
+        "backend": settings.perception.backend,
+    }
+    if _perception_engine is not None:
+        if hasattr(_perception_engine, 'get_metrics'):
+            engine_metrics = _perception_engine.get_metrics()
+            perception_info.update({
+                "device": engine_metrics.get("device", "unknown"),
+                "total_inferences": engine_metrics.get("total_inferences_run", 0),
+                "total_errors": engine_metrics.get("total_errors", 0),
+                "last_inference_time_ms": engine_metrics.get("last_inference_time_ms", 0),
+            })
+            if "imgsz" in engine_metrics:
+                perception_info["imgsz"] = engine_metrics["imgsz"]
+            if "confidence" in engine_metrics:
+                perception_info["confidence"] = engine_metrics["confidence"]
+    
+    # Pipeline health
+    effective_fps = 0.0
+    if _latency_window:
+        total_latencies = [r.total_ms for r in _latency_window]
+        mean_total = sum(total_latencies) / len(total_latencies)
+        effective_fps = round(1000.0 / mean_total, 1) if mean_total > 0 else 0.0
+    
+    pipeline_health = {
+        "frames_processed": _last_frame_id + 1,
+        "current_risk_state": decision.risk_state.value if decision else "UNKNOWN",
+        "geometry_loaded": _density_processor is not None and _density_processor._geometry is not None,
+        "region_density_active": (
+            density_state is not None
+            and density_state.region_densities is not None
+        ),
+        "effective_fps": effective_fps,
+    }
+    
     return JSONResponse({
         "uptime_seconds": round(time.time() - _startup_time, 1),
         "perception_backend": settings.perception.backend,
@@ -600,6 +713,9 @@ async def metrics() -> JSONResponse:
         **density_metrics,
         **flow_metrics,
         **agent_metrics,
+        "latency": latency_stats,
+        "perception": perception_info,
+        "pipeline": pipeline_health,
     })
 
 
