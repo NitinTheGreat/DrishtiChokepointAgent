@@ -299,7 +299,7 @@ def export_ablation_data(
             "config", "transitions", "false_recoveries", "oscillations",
             "escalation_delay_sec", "recovery_delay_sec", "mean_duration_sec",
         ]
-        with open(output_file, "w", newline="") as f:
+        with open(output_file, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(comparison)

@@ -1,0 +1,20 @@
+\begin{table}[t]
+\centering
+\caption{System Architecture Properties}
+\label{tab:system}
+\begin{tabular}{ll}
+\toprule
+\textbf{Property} & \textbf{Value} \\
+\midrule
+        Perception backends & Mock, YOLOv8n, Google Cloud Vision \\
+        Decision mechanism & Deterministic state machine \\
+        Risk states & NORMAL, BUILDUP, CRITICAL \\
+        State vector dimensions & 4 (density, slope, pressure, coherence) \\
+        Hysteresis & Asymmetric (3s escalation, 6s recovery) \\
+        Privacy model & Aggregate-only (no individual tracking) \\
+        Framework & LangGraph (control flow only, no LLM) \\
+        Latency (mean) & 18.4 ms \\
+        Real-time capable & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}

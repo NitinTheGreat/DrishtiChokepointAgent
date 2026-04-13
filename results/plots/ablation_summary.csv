@@ -1,0 +1,5 @@
+config,transitions,false_recoveries,oscillations,escalation_delay_sec,recovery_delay_sec,mean_duration_sec
+No hysteresis (0/0/0),4,1,2,0.0,0.0,2.0
+Sym narrow (3/3/3),0,0,0,3.0,3.0,9.9
+Sym wide (5/5/5),0,0,0,5.0,5.0,9.9
+Proposed (5/3/6)  ★,0,0,0,3.0,6.0,9.9

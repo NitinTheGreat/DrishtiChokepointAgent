@@ -1,0 +1,17 @@
+scenario,config,transitions,false_recoveries,oscillation_events,first_escalation_sec
+Surge-and-Dip,no_hysteresis,6,1,2,35.1
+Surge-and-Dip,symmetric_narrow,4,0,0,38.0
+Surge-and-Dip,symmetric_wide,4,0,0,40.0
+Surge-and-Dip,proposed,4,0,0,38.0
+Boundary Oscillation,no_hysteresis,41,20,39,0.1
+Boundary Oscillation,symmetric_narrow,1,0,0,7.9
+Boundary Oscillation,symmetric_wide,0,0,0,
+Boundary Oscillation,proposed,1,0,0,8.0
+Pressure Spike + Coherence,no_hysteresis,4,0,0,30.6
+Pressure Spike + Coherence,symmetric_narrow,3,0,0,37.0
+Pressure Spike + Coherence,symmetric_wide,3,0,0,47.2
+Pressure Spike + Coherence,proposed,3,0,0,37.0
+Gradual Ramp,no_hysteresis,4,0,0,34.4
+Gradual Ramp,symmetric_narrow,4,0,0,37.3
+Gradual Ramp,symmetric_wide,4,0,0,39.3
+Gradual Ramp,proposed,4,0,0,37.3
